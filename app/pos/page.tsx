@@ -680,6 +680,7 @@ export default function POSBilling() {
               desc: i.snapshot_name === "Custom Item" ? "Custom" : "",
               price: Number(i.snapshot_price) || 0,
               qty: Number(i.quantity) || 0,
+              product_id: i.product_id,
             })),
             subtotal: Number(o.subtotal) || 0,
             discount: Number(o.discount_amount) || 0,
@@ -2090,6 +2091,29 @@ export default function POSBilling() {
       .reduce((acc, e) => acc + e.amount, 0);
   }, [expenses, analyticsPeriod, analyticsStartDate, analyticsEndDate]);
 
+  // Cost-price figures for the dashboard. Costs come from the catalogue as it is
+  // now (bills don't snapshot cost), matched by product link, else by name.
+  const costByProductId = React.useMemo(() => {
+    const map = new Map<string, number>();
+    catalog.forEach((c) => {
+      if (c.itemType !== "SERVICE") map.set(c.productId || c.id, c.costPrice ?? 0);
+    });
+    return map;
+  }, [catalog]);
+
+  const stockCostValue = React.useMemo(() => {
+    let value = 0;
+    let products = 0;
+    catalog.forEach((c) => {
+      if (c.itemType === "SERVICE") return;
+      const stock = Math.max(0, Number(c.stock) || 0);
+      if (stock === 0) return;
+      value += stock * (c.costPrice ?? 0);
+      products += 1;
+    });
+    return { value, products };
+  }, [catalog]);
+
   // Real-time analytics derived from orders with period filtering
   const {
     analyticsFilteredOrders,
@@ -2476,6 +2500,35 @@ export default function POSBilling() {
     analyticsEndDate,
     analyticsGstFilter,
   ]);
+
+  const soldCost = React.useMemo(() => {
+    const idByName = new Map<string, string>();
+    const catalogIds = new Set<string>();
+    catalog.forEach((c) => {
+      catalogIds.add(c.productId || c.id);
+      if (c.itemType !== "SERVICE") idByName.set(c.name.trim().toLowerCase(), c.productId || c.id);
+    });
+    let cost = 0;
+    let units = 0;
+    let revenue = 0; // line value of the costed items, for the margin
+    let uncosted = 0; // product lines whose product is no longer in the catalogue
+    analyticsFilteredOrders.forEach((order) => {
+      order.items.forEach((item) => {
+        if (!item.name || item.name.startsWith("GST (")) return;
+        const id =
+          (item.product_id && costByProductId.has(item.product_id) && item.product_id) ||
+          idByName.get(item.name.trim().toLowerCase());
+        if (!id) {
+          if (item.product_id && !catalogIds.has(item.product_id)) uncosted += 1;
+          return;
+        }
+        cost += (costByProductId.get(id) ?? 0) * item.qty;
+        units += item.qty;
+        revenue += item.price * item.qty;
+      });
+    });
+    return { cost, units, margin: revenue - cost, uncosted };
+  }, [analyticsFilteredOrders, catalog, costByProductId]);
 
   // Inventory-derived data (pure catalog — stock tracking removed).
   const inventoryProducts = catalog.filter((c) => !c.id.startsWith("default-"));
@@ -6488,6 +6541,66 @@ export default function POSBilling() {
                     </div>
                   </div>
                 )}
+
+                {/* Cost price — stock in hand, and cost of what sold in this period */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
+                  <div className="bg-white border border-[#0F766E]/30 rounded-2xl p-5 shadow-sm hover:shadow-md transition-all">
+                    <div className="flex justify-between items-start mb-2">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-[#000000]">
+                        Total Cost Price (Stock in Hand)
+                      </span>
+                      <div className="w-8 h-8 rounded-full bg-[#0F766E]/10 flex items-center justify-center">
+                        <Package className="w-4 h-4 text-[#0F766E]" />
+                      </div>
+                    </div>
+                    <div className="text-2xl font-black text-[#0F766E]">
+                      ₹
+                      {stockCostValue.value.toLocaleString("en-IN", {
+                        minimumFractionDigits: 2,
+                        maximumFractionDigits: 2,
+                      })}
+                    </div>
+                    <div className="text-[9px] text-[#000000] font-semibold mt-1">
+                      Cost price × current stock · {stockCostValue.products} product
+                      {stockCostValue.products === 1 ? "" : "s"} in stock
+                    </div>
+                  </div>
+
+                  <div className="bg-white border border-[#B45309]/30 rounded-2xl p-5 shadow-sm hover:shadow-md transition-all">
+                    <div className="flex justify-between items-start mb-2">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-[#000000]">
+                        Cost Price of Products Sold
+                      </span>
+                      <div className="w-8 h-8 rounded-full bg-[#B45309]/10 flex items-center justify-center">
+                        <Coins className="w-4 h-4 text-[#B45309]" />
+                      </div>
+                    </div>
+                    <div className="text-2xl font-black text-[#B45309]">
+                      ₹
+                      {soldCost.cost.toLocaleString("en-IN", {
+                        minimumFractionDigits: 2,
+                        maximumFractionDigits: 2,
+                      })}
+                    </div>
+                    <div className="text-[9px] text-[#000000] font-semibold mt-1">
+                      Cost price × qty sold · {soldCost.units} unit{soldCost.units === 1 ? "" : "s"} ·
+                      Margin{" "}
+                      <span className={soldCost.margin >= 0 ? "text-[#059669]" : "text-[#B91C1C]"}>
+                        {soldCost.margin < 0 ? "−" : ""}₹
+                        {Math.abs(soldCost.margin).toLocaleString("en-IN", {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        })}
+                      </span>
+                      {soldCost.uncosted > 0 && (
+                        <span className="text-[#000000]/50">
+                          {" "}
+                          · {soldCost.uncosted} line{soldCost.uncosted === 1 ? "" : "s"} of deleted products not counted
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
 
                 {/* Top 5x2 KPI Grid */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-4">

@@ -325,13 +325,22 @@ export default function SettingsPanel({
    * a colour is picked, so the admin sees the entire POS repaint instantly. The
    * persisted value only changes on Save.
    */
+  // Leaving Settings repaints with the saved colour (updated by onSaved). The
+  // server-injected vars live on the same inline style, so removing them would
+  // drop the page back to the globals.css fallback until the next reload.
+  const savedAccentRef = React.useRef(shop.accent_color);
+  React.useEffect(() => {
+    savedAccentRef.current = shop.accent_color;
+  }, [shop.accent_color]);
+
   React.useEffect(() => {
     const root = document.documentElement;
-    const vars = accentCssVars(form.accent_color);
-    Object.entries(vars).forEach(([key, value]) => root.style.setProperty(key, value));
-    return () => {
-      Object.keys(vars).forEach((key) => root.style.removeProperty(key));
-    };
+    const apply = (accent: string) =>
+      Object.entries(accentCssVars(accent)).forEach(([key, value]) =>
+        root.style.setProperty(key, value),
+      );
+    apply(form.accent_color);
+    return () => apply(savedAccentRef.current);
   }, [form.accent_color]);
 
   const handleLogoPick = async (event: React.ChangeEvent<HTMLInputElement>) => {
