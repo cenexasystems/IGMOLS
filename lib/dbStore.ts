@@ -28,6 +28,7 @@ let customerSchemaChecked = false;
 let attendanceSchemaChecked = false;
 let advanceSchemaChecked = false;
 let movementSchemaChecked = false;
+let paymentSchemaChecked = false;
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
@@ -80,6 +81,30 @@ async function ensureCustomerSchema(): Promise<void> {
     customerSchemaChecked = true;
   } catch (err) {
     console.error('Failed to ensure customer schema:', err);
+  }
+}
+
+/**
+ * Card payments: add the split_card column and widen the payment-mode CHECKs
+ * (created by schema.sql for CASH / GPAY / SPLIT only) to accept CARD.
+ */
+async function ensurePaymentSchema(): Promise<void> {
+  if (paymentSchemaChecked) return;
+  try {
+    await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS split_card NUMERIC NOT NULL DEFAULT 0`;
+    await sql`ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_payment_mode_check`;
+    await sql`
+      ALTER TABLE orders ADD CONSTRAINT orders_payment_mode_check
+      CHECK (payment_mode IN ('CASH', 'GPAY', 'CARD', 'SPLIT'))
+    `;
+    await sql`ALTER TABLE advance_orders DROP CONSTRAINT IF EXISTS advance_orders_deposit_payment_mode_check`;
+    await sql`
+      ALTER TABLE advance_orders ADD CONSTRAINT advance_orders_deposit_payment_mode_check
+      CHECK (deposit_payment_mode IN ('CASH', 'GPAY', 'CARD', 'SPLIT'))
+    `;
+    paymentSchemaChecked = true;
+  } catch (err) {
+    console.error('Failed to ensure payment schema:', err);
   }
 }
 
@@ -506,8 +531,10 @@ export const dbStore = {
     cashReceived: number;
     splitCash?: number;
     splitGpay?: number;
+    splitCard?: number;
     paymentMode: PaymentMode;
   }): Promise<{ orderId: string }> {
+    await ensurePaymentSchema();
     // Neon HTTP doesn't natively support full interactive transactions in the simple
     // API, so we run statements sequentially/concurrently which is fine at this scale.
 
@@ -543,14 +570,14 @@ export const dbStore = {
       INSERT INTO orders (
         id, customer_id, source, status, is_gst, subtotal, discount_type, discount_value,
         discount_amount, gst_percentage, gst_amount, delivery_fee, grand_total,
-        cash_received, split_cash, split_gpay, payment_mode, bill_date, created_at
+        cash_received, split_cash, split_gpay, split_card, payment_mode, bill_date, created_at
       ) VALUES (
         ${payload.orderId}, ${customer.id}, ${payload.source}, 'COMPLETED', ${payload.isGst},
         ${subtotalExclusive},
         ${payload.discountType}, ${payload.discountValue}, ${payload.discountAmount},
         ${payload.gstPercentage}, ${payload.gstAmount}, ${payload.deliveryFee},
         ${payload.grandTotal}, ${payload.cashReceived},
-        ${payload.splitCash ?? 0}, ${payload.splitGpay ?? 0},
+        ${payload.splitCash ?? 0}, ${payload.splitGpay ?? 0}, ${payload.splitCard ?? 0},
         ${payload.paymentMode}, ${payload.billDate}, now()
       )
     `;
@@ -669,6 +696,7 @@ export const dbStore = {
     }[];
   }): Promise<{ advanceOrderId: string }> {
     await this.ensureAdvanceSchema();
+    await ensurePaymentSchema();
     const customer = await this.upsertCustomer(
       payload.customerName,
       payload.customerPhone,

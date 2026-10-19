@@ -82,8 +82,9 @@ CREATE TABLE IF NOT EXISTS orders (
   cash_received    NUMERIC NOT NULL DEFAULT 0,
   split_cash       NUMERIC NOT NULL DEFAULT 0,
   split_gpay       NUMERIC NOT NULL DEFAULT 0,
+  split_card       NUMERIC NOT NULL DEFAULT 0,
   payment_mode     TEXT NOT NULL DEFAULT 'CASH'
-                   CHECK (payment_mode IN ('CASH', 'GPAY', 'SPLIT')),
+                   CHECK (payment_mode IN ('CASH', 'GPAY', 'CARD', 'SPLIT')),
 
   bill_date        DATE NOT NULL DEFAULT CURRENT_DATE,
   created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -132,7 +133,7 @@ CREATE TABLE IF NOT EXISTS advance_orders (
   total_amount         NUMERIC NOT NULL DEFAULT 0,
   deposit_amount       NUMERIC NOT NULL DEFAULT 0,
   deposit_payment_mode TEXT NOT NULL DEFAULT 'CASH'
-                       CHECK (deposit_payment_mode IN ('CASH', 'GPAY', 'SPLIT')),
+                       CHECK (deposit_payment_mode IN ('CASH', 'GPAY', 'CARD', 'SPLIT')),
   delivery_date        DATE,
   notes                TEXT,
   -- bill-level charges at booking (NULL on orders booked before they were stored)

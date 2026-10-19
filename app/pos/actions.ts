@@ -140,6 +140,7 @@ export async function submitOrder(payload: {
   cashReceived: number;
   splitCash?: number;
   splitGpay?: number;
+  splitCard?: number;
   paymentMode: PaymentMode;
 }): Promise<{ orderId: string }> {
   return await dbStore.submitOrder(payload);

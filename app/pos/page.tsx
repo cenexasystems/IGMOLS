@@ -113,9 +113,39 @@ const EXPENSE_PAYMENT_MODES = ["CASH", "UPI", "CARD", "BANK", "OTHER"] as const;
 // Payment options available at the point of sale.
 // ORDER_PAYMENT_MODES is used for single-mode contexts (advance deposit / balance).
 // POS_PAYMENT_MODES adds Split for full sales at the billing counter.
-const ORDER_PAYMENT_MODES = ["CASH", "GPAY"] as const;
-const POS_PAYMENT_MODES = ["CASH", "GPAY", "SPLIT"] as const;
-type OrderPaymentMode = "CASH" | "GPAY" | "SPLIT";
+const ORDER_PAYMENT_MODES = ["CASH", "GPAY", "CARD"] as const;
+const POS_PAYMENT_MODES = ["CASH", "GPAY", "CARD", "SPLIT"] as const;
+type OrderPaymentMode = "CASH" | "GPAY" | "CARD" | "SPLIT";
+// A split bill is paid with any two (or all three) of these.
+type SplitMethod = "CASH" | "GPAY" | "CARD";
+const SPLIT_METHODS: SplitMethod[] = ["CASH", "GPAY", "CARD"];
+const PAYMENT_LABELS: Record<OrderPaymentMode, string> = {
+  CASH: "Cash",
+  GPAY: "QR / GPay",
+  CARD: "Card",
+  SPLIT: "Split",
+};
+
+/** "Cash ₹500 + Card ₹700" for a split bill; the plain label otherwise. */
+const paymentSummary = (o: {
+  paymentMode: OrderPaymentMode;
+  splitCash?: number;
+  splitGpay?: number;
+  splitCard?: number;
+}): string => {
+  if (o.paymentMode !== "SPLIT") return PAYMENT_LABELS[o.paymentMode];
+  const parts = (
+    [
+      ["CASH", o.splitCash],
+      ["GPAY", o.splitGpay],
+      ["CARD", o.splitCard],
+    ] as const
+  ).filter(([, amt]) => (amt || 0) > 0);
+  if (parts.length === 0) return "Split";
+  return parts
+    .map(([m, amt]) => `${PAYMENT_LABELS[m]} ₹${(amt || 0).toLocaleString("en-IN")}`)
+    .join(" + ");
+};
 
 // Shared date-window test reused by the Expenses tab and the analytics dashboard.
 type PeriodKey = "all" | "today" | "week" | "month" | "year" | "custom";
@@ -205,6 +235,7 @@ type CompletedOrder = {
   cashReceived: number;
   splitCash?: number;
   splitGpay?: number;
+  splitCard?: number;
   paymentMode: OrderPaymentMode;
   date: string;
   createdAt: string;
@@ -454,9 +485,12 @@ export default function POSBilling() {
   const [deliveryFee, setDeliveryFee] = useState<number>(0);
   const [cashReceived, setCashReceived] = useState<number>(0);
   const [paymentMode, setPaymentMode] = useState<OrderPaymentMode>("CASH");
-  // Split payment: cash + gpay portions (only used when paymentMode === "SPLIT")
+  // Split payment: portions per method (only used when paymentMode === "SPLIT").
+  // splitMethods is which of Cash / QR / Card this bill is split between.
   const [splitCash, setSplitCash] = useState<number>(0);
   const [splitGpay, setSplitGpay] = useState<number>(0);
+  const [splitCard, setSplitCard] = useState<number>(0);
+  const [splitMethods, setSplitMethods] = useState<SplitMethod[]>(["CASH", "GPAY"]);
   const [applyGST, setApplyGST] = useState<boolean>(false);
   const [gstPercentage, setGstPercentage] = useState<number>(18);
   const [activeInvoiceId, setActiveInvoiceId] = useState<string | null>(null);
@@ -695,6 +729,7 @@ export default function POSBilling() {
             cashReceived: Number(o.cash_received) || 0,
             splitCash: Number((o as { split_cash?: number }).split_cash) || 0,
             splitGpay: Number((o as { split_gpay?: number }).split_gpay) || 0,
+            splitCard: Number((o as { split_card?: number }).split_card) || 0,
             paymentMode: (POS_PAYMENT_MODES as readonly string[]).includes(
               String(o.payment_mode),
             )
@@ -1330,7 +1365,7 @@ export default function POSBilling() {
     setAdvDeposit("");
     setAdvDeliveryDate("");
     setAdvNotes("");
-    setAdvDepositPaymentMode(paymentMode);
+    setAdvDepositPaymentMode(paymentMode === "SPLIT" ? "CASH" : paymentMode);
     setShowAdvanceSaveModal(true);
   };
 
@@ -1393,6 +1428,8 @@ export default function POSBilling() {
       setCashReceived(0);
       setSplitCash(0);
       setSplitGpay(0);
+      setSplitCard(0);
+      setSplitMethods(["CASH", "GPAY"]);
       setShowAdvanceSaveModal(false);
       await fetchData();
 
@@ -1503,6 +1540,7 @@ export default function POSBilling() {
             cashReceived: Number(created.cash_received) || 0,
             splitCash: Number((created as { split_cash?: number }).split_cash) || 0,
             splitGpay: Number((created as { split_gpay?: number }).split_gpay) || 0,
+            splitCard: Number((created as { split_card?: number }).split_card) || 0,
             paymentMode: (POS_PAYMENT_MODES as readonly string[]).includes(
               String(created.payment_mode),
             )
@@ -1641,12 +1679,22 @@ export default function POSBilling() {
     let receivedAmount = cashReceived;
     let splitCashVal = 0;
     let splitGpayVal = 0;
+    let splitCardVal = 0;
     if (paymentMode === "SPLIT") {
-      splitCashVal = Number(splitCash) || 0;
-      splitGpayVal = Number(splitGpay) || 0;
-      receivedAmount = splitCashVal + splitGpayVal;
-    } else if (paymentMode === "GPAY") {
-      // GPay is an exact digital transfer — no change to return.
+      // Only the methods picked for this split count; hidden boxes are ignored.
+      splitCashVal = splitMethods.includes("CASH") ? Number(splitCash) || 0 : 0;
+      splitGpayVal = splitMethods.includes("GPAY") ? Number(splitGpay) || 0 : 0;
+      splitCardVal = splitMethods.includes("CARD") ? Number(splitCard) || 0 : 0;
+      const partsPaid = [splitCashVal, splitGpayVal, splitCardVal].filter((v) => v > 0).length;
+      if (partsPaid < 2) {
+        alert(
+          "A split payment needs amounts for at least two methods. For a single method, choose Cash, QR / GPay or Card instead.",
+        );
+        return null;
+      }
+      receivedAmount = splitCashVal + splitGpayVal + splitCardVal;
+    } else if (paymentMode === "GPAY" || paymentMode === "CARD") {
+      // QR and card are exact digital transfers — no change to return.
       receivedAmount = cashReceived > 0 ? cashReceived : localGrandTotal;
     }
 
@@ -1681,6 +1729,7 @@ export default function POSBilling() {
         cashReceived: receivedAmount,
         splitCash: splitCashVal,
         splitGpay: splitGpayVal,
+        splitCard: splitCardVal,
         paymentMode: paymentMode,
       });
 
@@ -1712,6 +1761,7 @@ export default function POSBilling() {
         cashReceived: Number(receivedAmount) || 0,
         splitCash: splitCashVal,
         splitGpay: splitGpayVal,
+        splitCard: splitCardVal,
         paymentMode: paymentMode,
         date: orderTimestamp,
         createdAt: new Date().toISOString(),
@@ -1738,6 +1788,8 @@ export default function POSBilling() {
       setCashReceived(0);
       setSplitCash(0);
       setSplitGpay(0);
+      setSplitCard(0);
+      setSplitMethods(["CASH", "GPAY"]);
       setPaymentMode("CASH");
       setApplyGST(false);
       setGstPercentage(18);
@@ -1834,7 +1886,7 @@ export default function POSBilling() {
     }
 
     message += `\n${moneyEmoji} *Total Amount: ₹${order.grandTotal.toLocaleString(undefined, { minimumFractionDigits: 2 })}*\n`;
-    message += `Payment: ${order.paymentMode}\n\n`;
+    message += `Payment: ${paymentSummary(order)}\n\n`;
     message += `${receiptEmoji} View and download your detailed digital receipt here:\n${invoiceUrl}`;
     const encodedMessage = encodeURIComponent(message);
     const cleanPhone = order.customerPhone.replace(/\D/g, "").slice(-10);
@@ -3977,10 +4029,17 @@ export default function POSBilling() {
                   <span>Payment Receipt</span>
                   <span className="text-[9px] font-black text-[var(--accent)] bg-black/5 px-2 py-0.5 rounded">
                     {completedBillData.paymentMode === "SPLIT"
-                      ? "Split · Cash + GPay"
-                      : completedBillData.paymentMode === "GPAY"
-                        ? "GPay"
-                        : "Cash"}
+                      ? `Split · ${SPLIT_METHODS.filter(
+                          (m) =>
+                            ((m === "CASH"
+                              ? completedBillData.splitCash
+                              : m === "GPAY"
+                                ? completedBillData.splitGpay
+                                : completedBillData.splitCard) || 0) > 0,
+                        )
+                          .map((m) => PAYMENT_LABELS[m])
+                          .join(" + ")}`
+                      : PAYMENT_LABELS[completedBillData.paymentMode as OrderPaymentMode] ?? "Cash"}
                   </span>
                 </div>
 
@@ -3996,38 +4055,36 @@ export default function POSBilling() {
                   </span>
                 </div>
 
-                {completedBillData.paymentMode === "SPLIT" && (
-                  <>
-                    <div className="flex justify-between items-center text-xs">
-                      <span className="font-semibold text-gray-600">
-                        Paid by Cash
-                      </span>
-                      <span className="text-sm font-bold text-black">
-                        ₹
-                        {(completedBillData.splitCash || 0).toLocaleString(undefined, {
-                          minimumFractionDigits: 2,
-                        })}
-                      </span>
-                    </div>
-                    <div className="flex justify-between items-center text-xs">
-                      <span className="font-semibold text-gray-600">
-                        Paid by GPay
-                      </span>
-                      <span className="text-sm font-bold text-black">
-                        ₹
-                        {(completedBillData.splitGpay || 0).toLocaleString(undefined, {
-                          minimumFractionDigits: 2,
-                        })}
-                      </span>
-                    </div>
-                  </>
-                )}
+                {completedBillData.paymentMode === "SPLIT" &&
+                  (
+                    [
+                      ["Cash", completedBillData.splitCash],
+                      ["QR / GPay", completedBillData.splitGpay],
+                      ["Card", completedBillData.splitCard],
+                    ] as const
+                  )
+                    .filter(([, amt]) => (amt || 0) > 0)
+                    .map(([label, amt]) => (
+                      <div key={label} className="flex justify-between items-center text-xs">
+                        <span className="font-semibold text-gray-600">
+                          Paid by {label}
+                        </span>
+                        <span className="text-sm font-bold text-black">
+                          ₹
+                          {(amt || 0).toLocaleString(undefined, {
+                            minimumFractionDigits: 2,
+                          })}
+                        </span>
+                      </div>
+                    ))}
 
                 <div className="flex justify-between items-center text-xs">
                   <span className="font-semibold text-gray-600">
                     {completedBillData.paymentMode === "GPAY"
-                      ? "Paid via GPay"
-                      : completedBillData.paymentMode === "SPLIT"
+                      ? "Paid via QR / GPay"
+                      : completedBillData.paymentMode === "CARD"
+                        ? "Paid by Card"
+                        : completedBillData.paymentMode === "SPLIT"
                         ? "Total Received"
                         : "Amount Received"}
                   </span>
@@ -4041,7 +4098,8 @@ export default function POSBilling() {
                 </div>
 
                 {/* Balance Returned Box — cash change only */}
-                {completedBillData.paymentMode !== "GPAY" && (
+                {(completedBillData.paymentMode === "CASH" ||
+                  completedBillData.paymentMode === "SPLIT") && (
                   <div className="bg-[#F4F4F5] border border-[#E4E4E7] rounded-lg p-3 sm:p-3.5 flex justify-between items-center mt-1">
                     <span className="text-xs font-bold text-[var(--accent-strong)]">
                       Balance Returned
@@ -4873,19 +4931,19 @@ export default function POSBilling() {
                         <span className="block text-[9px] font-bold text-[#000000] uppercase tracking-wider">
                           Financial Option
                         </span>
-                        <div className="grid grid-cols-3 gap-1.5">
+                        <div className="grid grid-cols-4 gap-1.5">
                           {POS_PAYMENT_MODES.map((mode) => (
                             <button
                               key={mode}
                               type="button"
                               onClick={() => setPaymentMode(mode)}
-                              className={`py-1.5 rounded-lg text-[10px] font-bold tracking-wider uppercase transition-all cursor-pointer border ${
+                              className={`py-1.5 px-1 rounded-lg text-[10px] font-bold tracking-wider uppercase transition-all cursor-pointer border ${
                                 paymentMode === mode
                                   ? "bg-[var(--accent)] text-white border-[var(--accent)] shadow-sm"
                                   : "bg-white text-[#000000] border-black/10 hover:border-[var(--accent)]"
                               }`}
                             >
-                              {mode === "GPAY" ? "GPay" : mode === "SPLIT" ? "Split" : mode}
+                              {PAYMENT_LABELS[mode]}
                             </button>
                           ))}
                         </div>
@@ -4906,86 +4964,126 @@ export default function POSBilling() {
 
                       {/* Payment inputs — per selected method */}
                       {paymentMode === "SPLIT" ? (
-                        <div className="bg-[#FFFFFF]/40 border border-black/10 rounded-xl p-4 mt-2 space-y-3">
-                          <span className="block text-[9px] font-bold text-[#000000] uppercase tracking-wider">
-                            Split Payment
-                          </span>
-                          <div className="grid grid-cols-2 gap-2">
-                            <div>
-                              <label className="block text-[10px] font-bold text-[#000000] mb-1.5">
-                                Cash (₹)
-                              </label>
-                              <input
-                                type="number"
-                                className="w-full bg-white border border-black/10 focus:border-[var(--accent)] rounded-lg px-3 py-2 text-base font-bold text-[#000000] placeholder:text-[#000000] focus:outline-none transition-colors"
-                                value={splitCash || ""}
-                                onWheel={(e) => e.currentTarget.blur()}
-                                onChange={(e) =>
-                                  setSplitCash(parseFloat(e.target.value) || 0)
-                                }
-                                placeholder="0.00"
-                              />
+                        (() => {
+                          const splitValues: Record<SplitMethod, number> = {
+                            CASH: splitCash,
+                            GPAY: splitGpay,
+                            CARD: splitCard,
+                          };
+                          const setSplitValue: Record<SplitMethod, (v: number) => void> = {
+                            CASH: setSplitCash,
+                            GPAY: setSplitGpay,
+                            CARD: setSplitCard,
+                          };
+                          const splitTotal = splitMethods.reduce(
+                            (acc, m) => acc + (splitValues[m] || 0),
+                            0,
+                          );
+                          const toggleSplitMethod = (m: SplitMethod) =>
+                            setSplitMethods((prev) =>
+                              prev.includes(m)
+                                ? prev.length > 2
+                                  ? prev.filter((x) => x !== m)
+                                  : prev // a split always needs at least two methods
+                                : SPLIT_METHODS.filter((x) => x === m || prev.includes(x)),
+                            );
+                          return (
+                            <div className="bg-[#FFFFFF]/40 border border-black/10 rounded-xl p-4 mt-2 space-y-3">
+                              <div>
+                                <span className="block text-[9px] font-bold text-[#000000] uppercase tracking-wider mb-1.5">
+                                  Split Between (pick 2 or 3)
+                                </span>
+                                <div className="grid grid-cols-3 gap-1.5">
+                                  {SPLIT_METHODS.map((m) => {
+                                    const on = splitMethods.includes(m);
+                                    return (
+                                      <button
+                                        key={m}
+                                        type="button"
+                                        onClick={() => toggleSplitMethod(m)}
+                                        aria-pressed={on}
+                                        className={`py-1.5 px-1 rounded-lg text-[10px] font-bold tracking-wider uppercase transition-all cursor-pointer border flex items-center justify-center gap-1 ${
+                                          on
+                                            ? "bg-[var(--accent-softer)] text-[var(--accent)] border-[var(--accent)]"
+                                            : "bg-white text-[#000000]/50 border-black/10 hover:border-[var(--accent)]"
+                                        }`}
+                                      >
+                                        {on && <Check className="w-3 h-3" />}
+                                        {PAYMENT_LABELS[m]}
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                              <div
+                                className={`grid gap-2 ${splitMethods.length === 3 ? "grid-cols-3" : "grid-cols-2"}`}
+                              >
+                                {splitMethods.map((m) => (
+                                  <div key={m}>
+                                    <label className="block text-[10px] font-bold text-[#000000] mb-1.5">
+                                      {PAYMENT_LABELS[m]} (₹)
+                                    </label>
+                                    <input
+                                      type="number"
+                                      className="w-full bg-white border border-black/10 focus:border-[var(--accent)] rounded-lg px-3 py-2 text-base font-bold text-[#000000] placeholder:text-[#000000] focus:outline-none transition-colors"
+                                      value={splitValues[m] || ""}
+                                      onWheel={(e) => e.currentTarget.blur()}
+                                      onChange={(e) =>
+                                        setSplitValue[m](parseFloat(e.target.value) || 0)
+                                      }
+                                      placeholder="0.00"
+                                    />
+                                  </div>
+                                ))}
+                              </div>
+                              <div className="flex justify-between items-center text-xs pt-1 border-t border-black/10">
+                                <span className="font-bold text-[#000000] uppercase tracking-[0.05em]">
+                                  Total Received
+                                </span>
+                                <span className="font-black text-sm text-[var(--accent)]">
+                                  ₹
+                                  {splitTotal.toLocaleString(undefined, {
+                                    minimumFractionDigits: 2,
+                                  })}
+                                </span>
+                              </div>
+                              {splitTotal < grandTotal ? (
+                                <div className="flex justify-between items-center text-xs">
+                                  <span className="font-bold text-[#000000] uppercase tracking-[0.05em]">
+                                    Balance Remaining
+                                  </span>
+                                  <span className="font-black text-sm text-[#DC2626]">
+                                    ₹
+                                    {(grandTotal - splitTotal).toLocaleString(undefined, {
+                                      minimumFractionDigits: 2,
+                                    })}
+                                  </span>
+                                </div>
+                              ) : (
+                                <div className="flex justify-between items-center text-xs">
+                                  <span className="font-bold text-[#000000] uppercase tracking-[0.05em]">
+                                    Change to Return
+                                  </span>
+                                  <span className="font-black text-sm text-[#00A86B]">
+                                    ₹
+                                    {(splitTotal - grandTotal).toLocaleString(undefined, {
+                                      minimumFractionDigits: 2,
+                                    })}
+                                  </span>
+                                </div>
+                              )}
                             </div>
-                            <div>
-                              <label className="block text-[10px] font-bold text-[#000000] mb-1.5">
-                                GPay (₹)
-                              </label>
-                              <input
-                                type="number"
-                                className="w-full bg-white border border-black/10 focus:border-[var(--accent)] rounded-lg px-3 py-2 text-base font-bold text-[#000000] placeholder:text-[#000000] focus:outline-none transition-colors"
-                                value={splitGpay || ""}
-                                onWheel={(e) => e.currentTarget.blur()}
-                                onChange={(e) =>
-                                  setSplitGpay(parseFloat(e.target.value) || 0)
-                                }
-                                placeholder="0.00"
-                              />
-                            </div>
-                          </div>
-                          <div className="flex justify-between items-center text-xs pt-1 border-t border-black/10">
-                            <span className="font-bold text-[#000000] uppercase tracking-[0.05em]">
-                              Total Received
-                            </span>
-                            <span className="font-black text-sm text-[var(--accent)]">
-                              ₹
-                              {(splitCash + splitGpay).toLocaleString(undefined, {
-                                minimumFractionDigits: 2,
-                              })}
-                            </span>
-                          </div>
-                          {splitCash + splitGpay < grandTotal ? (
-                            <div className="flex justify-between items-center text-xs">
-                              <span className="font-bold text-[#000000] uppercase tracking-[0.05em]">
-                                Balance Remaining
-                              </span>
-                              <span className="font-black text-sm text-[#DC2626]">
-                                ₹
-                                {(grandTotal - (splitCash + splitGpay)).toLocaleString(undefined, {
-                                  minimumFractionDigits: 2,
-                                })}
-                              </span>
-                            </div>
-                          ) : (
-                            <div className="flex justify-between items-center text-xs">
-                              <span className="font-bold text-[#000000] uppercase tracking-[0.05em]">
-                                Change to Return
-                              </span>
-                              <span className="font-black text-sm text-[#00A86B]">
-                                ₹
-                                {(splitCash + splitGpay - grandTotal).toLocaleString(undefined, {
-                                  minimumFractionDigits: 2,
-                                })}
-                              </span>
-                            </div>
-                          )}
-                        </div>
+                          );
+                        })()
                       ) : (
                         <div className="bg-[#FFFFFF]/40 border border-black/10 rounded-xl p-4 mt-2">
                           <span className="block text-[9px] font-bold text-[#000000] uppercase tracking-wider mb-0.5">
-                            {paymentMode === "CASH" ? "Cash Payment" : "GPay Payment"}
+                            {PAYMENT_LABELS[paymentMode]} Payment
                           </span>
                           <label className="block text-[10px] font-bold text-[#000000] mb-2.5">
-                            {paymentMode === "CASH" ? "Amount Received (₹)" : "GPay Amount (₹)"}
+                            {paymentMode === "CASH"
+                              ? "Amount Received (₹)"
+                              : `${PAYMENT_LABELS[paymentMode]} Amount (₹)`}
                           </label>
                           <input
                             type="number"
@@ -5103,7 +5201,7 @@ export default function POSBilling() {
 
                 <div>
                   <label className="block text-[10px] font-bold text-[#000000] uppercase tracking-wider mb-1.5">Deposit Payment Mode</label>
-                  <div className="grid grid-cols-2 gap-1.5">
+                  <div className="grid grid-cols-3 gap-1.5">
                     {ORDER_PAYMENT_MODES.map((mode) => (
                       <button
                         key={mode}
@@ -5112,7 +5210,7 @@ export default function POSBilling() {
                           advDepositPaymentMode === mode ? "bg-[var(--accent)] text-white border-[var(--accent)]" : "bg-white text-black border-black/10 hover:border-[var(--accent)]"
                         }`}
                       >
-                        {mode === "GPAY" ? "GPay" : mode}
+                        {PAYMENT_LABELS[mode]}
                       </button>
                     ))}
                   </div>
@@ -5308,7 +5406,7 @@ export default function POSBilling() {
 
                     <div>
                       <label className="block text-[10px] font-bold text-[#000000] uppercase tracking-wider mb-1.5">Payment Method</label>
-                      <div className="grid grid-cols-2 gap-1.5">
+                      <div className="grid grid-cols-3 gap-1.5">
                         {ORDER_PAYMENT_MODES.map((mode) => (
                           <button
                             key={mode}
@@ -5317,7 +5415,7 @@ export default function POSBilling() {
                               receivePaymentMode === mode ? "bg-[var(--accent)] text-white border-[var(--accent)]" : "bg-white text-black border-black/10 hover:border-[var(--accent)]"
                             }`}
                           >
-                            {mode === "GPAY" ? "GPay" : mode}
+                            {PAYMENT_LABELS[mode]}
                           </button>
                         ))}
                       </div>

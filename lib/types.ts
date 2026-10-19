@@ -73,7 +73,8 @@ export type Customer = {
   created_at: string;
 };
 
-export type PaymentMode = 'CASH' | 'GPAY' | 'SPLIT';
+/** GPAY is shown as "QR / GPay". SPLIT spreads the bill across any of the other three. */
+export type PaymentMode = 'CASH' | 'GPAY' | 'CARD' | 'SPLIT';
 
 export type OrderRow = {
   id: string;
@@ -89,9 +90,10 @@ export type OrderRow = {
   gst_amount: number; // GST charged on (subtotal - discount), added on top
   delivery_fee: number;
   grand_total: number; // = subtotal - discount + delivery
-  cash_received: number; // total amount tendered (cash for CASH, gpay amount for GPAY, cash+gpay for SPLIT)
+  cash_received: number; // total amount tendered (the single mode's amount, or the sum of the split parts)
   split_cash: number; // cash portion when payment_mode = SPLIT
-  split_gpay: number; // gpay portion when payment_mode = SPLIT
+  split_gpay: number; // QR / GPay portion when payment_mode = SPLIT
+  split_card: number; // card portion when payment_mode = SPLIT
   payment_mode: PaymentMode;
   bill_date: string;
   created_at: string;

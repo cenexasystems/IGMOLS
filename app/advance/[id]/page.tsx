@@ -51,7 +51,13 @@ export default async function AdvanceReceiptPage({
   const depositNum = Number(advance.deposit_amount) || 0;
   const balanceNum = Math.max(0, totalNum - depositNum);
   const modeLabel = (mode: string | null | undefined) =>
-    mode === "SPLIT" ? "Cash + GPay" : mode === "GPAY" ? "GPay" : "Cash";
+    mode === "SPLIT"
+      ? "Split"
+      : mode === "GPAY"
+        ? "QR / GPay"
+        : mode === "CARD"
+          ? "Card"
+          : "Cash";
   const depositLabel = modeLabel(advance.deposit_payment_mode);
 
   // A completed advance is billed as paid in full. The final invoice holds what

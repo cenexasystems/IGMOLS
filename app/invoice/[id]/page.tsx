@@ -135,15 +135,25 @@ export default async function InvoicePage({
   const cashReceivedNum = Number(order.cash_received) || 0;
   const splitCashNum = Number(order.split_cash) || 0;
   const splitGpayNum = Number(order.split_gpay) || 0;
+  const splitCardNum = Number(order.split_card) || 0;
+  const splitParts = (
+    [
+      ["Cash", splitCashNum],
+      ["QR / GPay", splitGpayNum],
+      ["Card", splitCardNum],
+    ] as const
+  ).filter(([, amt]) => amt > 0);
   const changeReturned =
     cashReceivedNum > grandTotalNum ? cashReceivedNum - grandTotalNum : 0;
 
   const paymentLabel =
     order.payment_mode === "SPLIT"
-      ? "Split · Cash + GPay"
+      ? `Split · ${splitParts.map(([label]) => label).join(" + ")}`
       : order.payment_mode === "GPAY"
-        ? "GPay"
-        : "Cash";
+        ? "QR / GPay"
+        : order.payment_mode === "CARD"
+          ? "Card"
+          : "Cash";
 
   // Bills saved before GST became exclusive have GST embedded in the subtotal
   // (grand total = subtotal - discount + delivery). Newer bills add it on top.
@@ -522,18 +532,14 @@ export default async function InvoicePage({
               <div className="text-xs text-zinc-600 space-y-0.5 pt-1">
                 {order.payment_mode === "SPLIT" ? (
                   <>
-                    <div>
-                      <span className="text-zinc-400">Paid by Cash: </span>
-                      <span className="font-mono font-medium text-zinc-800">
-                        ₹{splitCashNum.toLocaleString("en-IN", { minimumFractionDigits: 2 })}
-                      </span>
-                    </div>
-                    <div>
-                      <span className="text-zinc-400">Paid by GPay: </span>
-                      <span className="font-mono font-medium text-zinc-800">
-                        ₹{splitGpayNum.toLocaleString("en-IN", { minimumFractionDigits: 2 })}
-                      </span>
-                    </div>
+                    {splitParts.map(([label, amt]) => (
+                      <div key={label}>
+                        <span className="text-zinc-400">Paid by {label}: </span>
+                        <span className="font-mono font-medium text-zinc-800">
+                          ₹{amt.toLocaleString("en-IN", { minimumFractionDigits: 2 })}
+                        </span>
+                      </div>
+                    ))}
                     <div>
                       <span className="text-zinc-400">Total Received: </span>
                       <span className="font-mono font-medium text-zinc-800">
@@ -544,7 +550,11 @@ export default async function InvoicePage({
                 ) : (
                   <div>
                     <span className="text-zinc-400">
-                      {order.payment_mode === "GPAY" ? "Paid via GPay: " : "Cash Received: "}
+                      {order.payment_mode === "GPAY"
+                        ? "Paid via QR / GPay: "
+                        : order.payment_mode === "CARD"
+                          ? "Paid by Card: "
+                          : "Cash Received: "}
                     </span>
                     <span className="font-mono font-medium text-zinc-800">
                       ₹{cashReceivedNum.toLocaleString("en-IN", { minimumFractionDigits: 2 })}
