@@ -187,9 +187,21 @@ const isDateInPeriod = (
   return true;
 };
 
+type CatalogVariant = {
+  id: string;
+  name: string;
+  price: number | null; // null = product price
+  costPrice: number | null; // null = product cost
+  stock: number | null;
+  barcode: string | null;
+};
+
 type CatalogItem = {
   id: string;
   name: string;
+  tamilName?: string;
+  barcode?: string;
+  variants?: CatalogVariant[];
   desc?: string;
   category?: string;
   price?: number;
@@ -212,6 +224,7 @@ type OrderItem = {
   price: number;
   qty: number;
   product_id?: string | null;
+  variant_id?: string | null;
   offerPct?: number; // automatic catalogue offer applied to this line
   originalPrice?: number; // catalogue price before the offer
 };
@@ -240,6 +253,85 @@ type CompletedOrder = {
   date: string;
   createdAt: string;
   status: "Completed" | "Pending";
+};
+
+/** A variant row in the product form; `id` is set for variants already saved. */
+type VariantDraft = {
+  key: string;
+  id?: string;
+  name: string;
+  price: number | "";
+  cost: number | "";
+  stock: number | "";
+  barcode: string;
+};
+
+const newVariantDraft = (): VariantDraft => ({
+  key: Math.random().toString(36).slice(2, 10),
+  name: "",
+  price: "",
+  cost: "",
+  stock: 0,
+  barcode: "",
+});
+
+/**
+ * One selectable line in a billing picker: a single-SKU item, or one variant
+ * of a variant product (billed as "Name (Variant)" at the variant's price).
+ */
+type CatalogPick = {
+  key: string;
+  item: CatalogItem;
+  variant?: CatalogVariant;
+  label: string;
+  price: number;
+};
+
+const catalogPicks = (catalog: CatalogItem[]): CatalogPick[] =>
+  catalog.flatMap((item) =>
+    item.variants && item.variants.length > 0
+      ? item.variants.map((v) => ({
+          key: `${item.id}:${v.id}`,
+          item,
+          variant: v,
+          label: `${item.name} (${v.name})`,
+          price: v.price ?? item.price ?? 0,
+        }))
+      : [{ key: item.id, item, label: item.name, price: item.price ?? 0 }],
+  );
+
+/** Matches name, Tamil name, description, or a (scanned) barcode. */
+const pickMatches = (pick: CatalogPick, query: string): boolean => {
+  const q = query.trim().toLowerCase();
+  if (!q) return true;
+  return [pick.label, pick.item.tamilName, pick.item.desc, pick.item.barcode, pick.variant?.barcode].some(
+    (field) => (field || "").toLowerCase().includes(q),
+  );
+};
+
+/** Fill a bill row from a picker choice, applying the item's automatic offer. */
+const applyCatalogPick = (
+  rowId: string,
+  pick: CatalogPick,
+  updateItem: (id: string, field: keyof OrderItem, value: unknown) => void,
+) => {
+  const { item, variant } = pick;
+  const offerPct = item.offerPct ?? 0;
+  // Variants take the product's offer % on their own price; a single-SKU item
+  // uses its stored offer price.
+  const offerPrice = variant
+    ? offerPct > 0
+      ? Math.round((pick.price - (pick.price * offerPct) / 100) * 100) / 100
+      : 0
+    : item.offerPrice ?? 0;
+  const onOffer = offerPct > 0 && offerPrice > 0;
+  updateItem(rowId, "name", pick.label);
+  updateItem(rowId, "desc", item.desc || "");
+  updateItem(rowId, "product_id", item.productId || item.id);
+  updateItem(rowId, "variant_id", variant?.id ?? null);
+  updateItem(rowId, "price", onOffer ? offerPrice : pick.price);
+  updateItem(rowId, "offerPct", onOffer ? offerPct : 0);
+  updateItem(rowId, "originalPrice", onOffer ? pick.price : undefined);
 };
 
 const SearchableItemInput = ({
@@ -273,24 +365,17 @@ const SearchableItemInput = ({
   }, []);
 
   // Inactive rows are hidden from the Billing Panel picker.
-  const filteredCatalog = catalog.filter(
-    (c) =>
-      (activeCategory === "ALL" || (c.category || "General") === activeCategory) &&
-      (c.isActive === undefined || c.isActive) &&
-      (c.name.toLowerCase().includes(internalSearch.toLowerCase()) ||
-        (c.desc && c.desc.toLowerCase().includes(internalSearch.toLowerCase()))),
-  );
+  const filteredCatalog = catalogPicks(
+    catalog.filter(
+      (c) =>
+        (activeCategory === "ALL" || (c.category || "General") === activeCategory) &&
+        (c.isActive === undefined || c.isActive),
+    ),
+  ).filter((pick) => pickMatches(pick, internalSearch));
 
   // Apply a catalog pick to this cart row.
-  const selectItem = (catItem: CatalogItem) => {
-    updateItem(item.id, "name", catItem.name);
-    updateItem(item.id, "desc", catItem.desc || "");
-    updateItem(item.id, "product_id", catItem.productId || null);
-    // An active catalogue offer is applied automatically on billing.
-    const onOffer = (catItem.offerPct ?? 0) > 0 && (catItem.offerPrice ?? 0) > 0;
-    updateItem(item.id, "price", onOffer ? (catItem.offerPrice as number) : (catItem.price ?? 0));
-    updateItem(item.id, "offerPct", onOffer ? (catItem.offerPct as number) : 0);
-    updateItem(item.id, "originalPrice", onOffer ? catItem.price : undefined);
+  const selectItem = (pick: CatalogPick) => {
+    applyCatalogPick(item.id, pick, updateItem);
     setIsOpen(false);
     setTimeout(() => {
       const priceInput = document.getElementById(`price-${item.id}`);
@@ -328,6 +413,8 @@ const SearchableItemInput = ({
       } else if (internalSearch.trim()) {
         updateItem(item.id, "name", internalSearch.trim());
         updateItem(item.id, "desc", "");
+        updateItem(item.id, "product_id", null);
+        updateItem(item.id, "variant_id", null);
         setIsOpen(false);
         setTimeout(() => {
           const priceInput = document.getElementById(`price-${item.id}`);
@@ -372,7 +459,7 @@ const SearchableItemInput = ({
               <Search className="w-4 h-4 text-[#000000] mr-2" />
               <input
                 type="text"
-                placeholder="Search catalog..."
+                placeholder="Search name, Tamil name or scan barcode..."
                 className="w-full bg-transparent text-[#000000] text-sm focus:outline-none placeholder:text-[#000000]"
                 value={internalSearch}
                 onChange={(e) => setInternalSearch(e.target.value)}
@@ -384,32 +471,40 @@ const SearchableItemInput = ({
           <div className="max-h-48 overflow-y-auto">
             {filteredCatalog.length > 0 ? (
               <ul className="py-1" ref={listRef}>
-                {filteredCatalog.map((catItem, idx) => {
+                {filteredCatalog.map((pick, idx) => {
                   return (
                     <li
-                      key={catItem.id}
+                      key={pick.key}
                       className={`px-5 py-3 border-b border-transparent last:border-0 transition-colors cursor-pointer ${idx === selectedIndex ? "bg-[#FFFFFF] border-l-4 border-l-[var(--accent)]" : "hover:bg-[#FFFFFF] border-l-4 border-l-transparent"}`}
                       onMouseDown={(e) => {
                         e.preventDefault();
-                        selectItem(catItem);
+                        selectItem(pick);
                       }}
                       onTouchStart={(e) => {
                         e.preventDefault();
-                        selectItem(catItem);
+                        selectItem(pick);
                       }}
                       onClick={() => {
-                        selectItem(catItem);
+                        selectItem(pick);
                       }}
                       onMouseEnter={() => setSelectedIndex(idx)}
                     >
-                      <div className="flex justify-between items-center">
+                      <div className="flex justify-between items-center gap-3">
                         <div className="text-sm font-bold text-[#000000]">
-                          {catItem.name}
+                          {pick.label}
+                        </div>
+                        <div className="text-xs font-bold text-[var(--accent)] shrink-0">
+                          ₹{pick.price.toLocaleString("en-IN")}
                         </div>
                       </div>
-                      {catItem.desc && (
+                      {pick.item.tamilName && (
+                        <div className="text-xs font-semibold text-[#000000]/60 mt-0.5">
+                          {pick.item.tamilName}
+                        </div>
+                      )}
+                      {pick.item.desc && (
                         <div className="text-[11px] font-semibold uppercase tracking-wider text-[#000000] mt-1">
-                          {catItem.desc}
+                          {pick.item.desc}
                         </div>
                       )}
                     </li>
@@ -664,6 +759,16 @@ export default function POSBilling() {
       offerPrice:
         p.offer_price === null || p.offer_price === undefined ? null : Number(p.offer_price),
       isActive: p.is_active === undefined ? true : Boolean(p.is_active),
+      tamilName: p.tamil_name || undefined,
+      barcode: p.barcode || undefined,
+      variants: (p.variants ?? []).map((v) => ({
+        id: v.id,
+        name: v.name,
+        price: v.price === null ? null : Number(v.price),
+        costPrice: v.cost_price === null ? null : Number(v.cost_price),
+        stock: v.stock === null ? null : Number(v.stock),
+        barcode: v.barcode,
+      })),
     };
   };
 
@@ -715,6 +820,7 @@ export default function POSBilling() {
               price: Number(i.snapshot_price) || 0,
               qty: Number(i.quantity) || 0,
               product_id: i.product_id,
+              variant_id: i.variant_id ?? null,
             })),
             subtotal: Number(o.subtotal) || 0,
             discount: Number(o.discount_amount) || 0,
@@ -786,6 +892,12 @@ export default function POSBilling() {
   const [newCatOfferPct, setNewCatOfferPct] = useState<number | "">("");
   const [newCatOfferPrice, setNewCatOfferPrice] = useState<number | "">("");
   const [newCatActive, setNewCatActive] = useState(true);
+  const [newCatTamil, setNewCatTamil] = useState("");
+  const [newCatBarcode, setNewCatBarcode] = useState("");
+  const [newCatHasVariants, setNewCatHasVariants] = useState(false);
+  const [newCatVariants, setNewCatVariants] = useState<VariantDraft[]>([]);
+  const updateVariantDraft = (key: string, patch: Partial<VariantDraft>) =>
+    setNewCatVariants((prev) => prev.map((v) => (v.key === key ? { ...v, ...patch } : v)));
 
   const [isSavingCatalog, setIsSavingCatalog] = useState<boolean>(false); // guards Save Product against double-clicks
   const [inventorySearch, setInventorySearch] = useState<string>("");
@@ -805,9 +917,17 @@ export default function POSBilling() {
   const [stockAdjustQty, setStockAdjustQty] = useState<number>(0);
   const [stockAdjustNote, setStockAdjustNote] = useState("");
   const [isSavingStock, setIsSavingStock] = useState(false);
+  // For a variant product the dialog adjusts one variant at a time.
+  const [stockAdjustVariantId, setStockAdjustVariantId] = useState<string | null>(null);
+  const stockAdjustVariant =
+    stockAdjustTarget?.variants?.find((v) => v.id === stockAdjustVariantId) ?? null;
+  const stockAdjustCurrent = stockAdjustVariant
+    ? stockAdjustVariant.stock ?? 0
+    : stockAdjustTarget?.stock ?? 0;
 
   const openStockAdjust = (item: CatalogItem) => {
     setStockAdjustTarget(item);
+    setStockAdjustVariantId(item.variants?.[0]?.id ?? null);
     setStockAdjustType("RESTOCK");
     setStockAdjustQty(0);
     setStockAdjustNote("");
@@ -821,7 +941,7 @@ export default function POSBilling() {
   // Where the count lands after this adjustment.
   const stockAdjustPreview = (() => {
     if (!stockAdjustTarget) return 0;
-    const current = stockAdjustTarget.stock ?? 0;
+    const current = stockAdjustCurrent;
     const qty = Math.max(0, Number(stockAdjustQty) || 0);
     switch (stockAdjustType) {
       case "RESTOCK":
@@ -834,7 +954,7 @@ export default function POSBilling() {
     }
   })();
 
-  const stockAdjustDelta = stockAdjustPreview - (stockAdjustTarget?.stock ?? 0);
+  const stockAdjustDelta = stockAdjustPreview - stockAdjustCurrent;
 
   const saveStockAdjustment = async () => {
     if (!stockAdjustTarget || isSavingStock) return;
@@ -845,9 +965,9 @@ export default function POSBilling() {
       alert("Enter a quantity greater than 0.");
       return;
     }
-    if (stockAdjustType === "LOSS" && qty > (target.stock ?? 0)) {
+    if (stockAdjustType === "LOSS" && qty > stockAdjustCurrent) {
       const proceed = window.confirm(
-        `Only ${target.stock ?? 0} in stock. Deducting ${qty} will set stock to 0. Continue?`,
+        `Only ${stockAdjustCurrent} in stock. Deducting ${qty} will set stock to 0. Continue?`,
       );
       if (!proceed) return;
     }
@@ -858,11 +978,14 @@ export default function POSBilling() {
         type: stockAdjustType,
         newStock: stockAdjustPreview,
         // Reconcile is an exact count, so align the low-stock warning with it too.
-        lowStockAlert:
-          stockAdjustType === "RECONCILE"
+        // The warning is product-wide, so counting one variant leaves it alone.
+        lowStockAlert: stockAdjustVariant
+          ? undefined
+          : stockAdjustType === "RECONCILE"
             ? Math.min(target.lowStockAlert ?? 0, stockAdjustPreview)
             : target.lowStockAlert ?? undefined,
         note: stockAdjustNote,
+        variantId: stockAdjustVariant?.id ?? null,
       });
       await fetchData();
       setStockAdjustTarget(null);
@@ -1020,6 +1143,10 @@ export default function POSBilling() {
     setNewCatOfferPct("");
     setNewCatOfferPrice("");
     setNewCatActive(true);
+    setNewCatTamil("");
+    setNewCatBarcode("");
+    setNewCatHasVariants(false);
+    setNewCatVariants([]);
   };
 
   const openEditCatalog = (catItem: CatalogItem, targetRowId?: string) => {
@@ -1037,6 +1164,20 @@ export default function POSBilling() {
     setNewCatOfferPct(catItem.offerPct ?? "");
     setNewCatOfferPrice(catItem.offerPrice ?? "");
     setNewCatActive(catItem.isActive === undefined ? true : catItem.isActive);
+    setNewCatTamil(catItem.tamilName || "");
+    setNewCatBarcode(catItem.barcode || "");
+    setNewCatHasVariants((catItem.variants?.length ?? 0) > 0);
+    setNewCatVariants(
+      (catItem.variants ?? []).map((v) => ({
+        key: v.id,
+        id: v.id,
+        name: v.name,
+        price: v.price ?? "",
+        cost: v.costPrice ?? "",
+        stock: v.stock ?? 0,
+        barcode: v.barcode || "",
+      })),
+    );
 
     setCatalogTargetRowId(targetRowId || null);
     setShowCatalogModal(true);
@@ -1167,8 +1308,59 @@ export default function POSBilling() {
 
     const isService = newCatType === "SERVICE";
 
+    // Variants: named rows only; names must be unique within the product.
+    const variantRows = newCatHasVariants ? newCatVariants.filter((v) => v.name.trim()) : [];
+    if (newCatHasVariants && variantRows.length === 0) {
+      alert(
+        isService
+          ? "Add at least one service option, or turn off Service Options."
+          : "Add at least one variant (e.g. S, M, L), or turn off Multi-Variant Product.",
+      );
+      return;
+    }
+    const variantNames = variantRows.map((v) => v.name.trim().toLowerCase());
+    if (new Set(variantNames).size !== variantNames.length) {
+      alert("Two variants have the same name. Give each variant a different name.");
+      return;
+    }
+
+    // A barcode must point at exactly one product or variant.
+    const formBarcodes = isService
+      ? []
+      : [newCatBarcode, ...variantRows.map((v) => v.barcode)]
+          .map((b) => b.trim())
+          .filter(Boolean);
+    const duplicateInForm = formBarcodes.find((b, i) => formBarcodes.indexOf(b) !== i);
+    if (duplicateInForm) {
+      alert(`Barcode ${duplicateInForm} is used twice in this form.`);
+      return;
+    }
+    for (const code of formBarcodes) {
+      const owner = catalog.find(
+        (c) =>
+          c.id !== editingCatalogId &&
+          (c.barcode === code || (c.variants ?? []).some((v) => v.barcode === code)),
+      );
+      if (owner) {
+        alert(`Barcode ${code} is already used by "${owner.name}".`);
+        return;
+      }
+    }
+
+    const variantStockTotal = variantRows.reduce((acc, v) => acc + (Number(v.stock) || 0), 0);
+    const variantsPayload = variantRows.map((v) => ({
+      id: v.id,
+      name: v.name.trim(),
+      price: v.price === "" ? null : Number(v.price),
+      cost_price: v.cost === "" ? null : Number(v.cost),
+      stock: isService ? null : Number(v.stock) || 0,
+      barcode: isService ? null : v.barcode.trim() || null,
+    }));
+
     const productPayload = {
       name: newCatName.trim(),
+      tamil_name: newCatTamil.trim() || null,
+      barcode: isService ? null : newCatBarcode.trim() || null,
       description: newCatDesc || null,
       category: newCatCategory.trim() || "General",
       gst_rate: Number(newCatGst) || 0,
@@ -1177,7 +1369,13 @@ export default function POSBilling() {
       item_type: newCatType,
       cost_price: newCatCost === "" ? 0 : Number(newCatCost),
       // Services never carry stock — the store nulls these out server-side.
-      current_stock: isService ? null : newCatStock === "" ? 0 : Number(newCatStock),
+      current_stock: isService
+        ? null
+        : variantRows.length > 0
+          ? variantStockTotal
+          : newCatStock === ""
+            ? 0
+            : Number(newCatStock),
       low_stock_alert: isService ? null : newCatLowStock === "" ? 0 : Number(newCatLowStock),
       offer_discount_pct: offerPct,
       offer_price: offerPrice,
@@ -1204,7 +1402,7 @@ export default function POSBilling() {
     setIsSavingCatalog(true);
     try {
     if (editingCatalogId) {
-      const data = await editProduct(editingCatalogId, productPayload);
+      const data = await editProduct(editingCatalogId, productPayload, variantsPayload);
       if (!data) {
         alert(
           "Product not found — it may have been removed. Refresh and try again.",
@@ -1235,7 +1433,7 @@ export default function POSBilling() {
       setEditingCatalogId(null);
       setShowCatalogModal(false);
     } else {
-      const product = await createProduct(productPayload);
+      const product = await createProduct({ ...productPayload, variants: variantsPayload });
       const newItem = productToCatalogItem(product);
       setCatalog([...catalog, newItem]);
 
@@ -1405,6 +1603,7 @@ export default function POSBilling() {
         gstAmount,
         items: items.map((i) => ({
           product_id: i.product_id || null,
+          variant_id: i.variant_id || null,
           snapshot_name: i.name,
           snapshot_desc: i.desc || null,
           snapshot_price: i.price,
@@ -1712,6 +1911,7 @@ export default function POSBilling() {
         items: itemsToSave.map((i) => ({
           id: i.id,
           product_id: i.product_id || null,
+          variant_id: i.variant_id || null,
           name: i.name,
           desc: i.desc,
           price: i.price,
@@ -1749,6 +1949,8 @@ export default function POSBilling() {
           qty: Number(i.qty) || 0,
           offerPct: i.offerPct ?? 0,
           originalPrice: i.originalPrice,
+          product_id: i.product_id || null,
+          variant_id: i.variant_id || null,
         })),
         subtotal: Number(localSubtotal) || 0,
         discount: Number(localCalculatedDiscount) || 0,
@@ -2160,7 +2362,14 @@ export default function POSBilling() {
       if (c.itemType === "SERVICE") return;
       const stock = Math.max(0, Number(c.stock) || 0);
       if (stock === 0) return;
-      value += stock * (c.costPrice ?? 0);
+      // Variant products are valued variant by variant at each variant's cost.
+      value +=
+        c.variants && c.variants.length > 0
+          ? c.variants.reduce(
+              (acc, v) => acc + Math.max(0, v.stock ?? 0) * (v.costPrice ?? c.costPrice ?? 0),
+              0,
+            )
+          : stock * (c.costPrice ?? 0);
       products += 1;
     });
     return { value, products };
@@ -2564,9 +2773,19 @@ export default function POSBilling() {
     let units = 0;
     let revenue = 0; // line value of the costed items, for the margin
     let uncosted = 0; // product lines whose product is no longer in the catalogue
+    const variantCost = new Map<string, number>();
+    catalog.forEach((c) =>
+      (c.variants ?? []).forEach((v) => variantCost.set(v.id, v.costPrice ?? c.costPrice ?? 0)),
+    );
     analyticsFilteredOrders.forEach((order) => {
       order.items.forEach((item) => {
         if (!item.name || item.name.startsWith("GST (")) return;
+        if (item.variant_id && variantCost.has(item.variant_id)) {
+          cost += (variantCost.get(item.variant_id) ?? 0) * item.qty;
+          units += item.qty;
+          revenue += item.price * item.qty;
+          return;
+        }
         const id =
           (item.product_id && costByProductId.has(item.product_id) && item.product_id) ||
           idByName.get(item.name.trim().toLowerCase());
@@ -2592,7 +2811,12 @@ export default function POSBilling() {
       return (
         p.name.toLowerCase().includes(q) ||
         (p.desc || "").toLowerCase().includes(q) ||
-        (p.hsnCode || "").toLowerCase().includes(q)
+        (p.hsnCode || "").toLowerCase().includes(q) ||
+        (p.tamilName || "").toLowerCase().includes(q) ||
+        (p.barcode || "").toLowerCase().includes(q) ||
+        (p.variants ?? []).some(
+          (v) => v.name.toLowerCase().includes(q) || (v.barcode || "").toLowerCase().includes(q),
+        )
       );
     })
     .sort((a, b) => {
@@ -2908,6 +3132,9 @@ export default function POSBilling() {
     const headers = [
       "Product ID",
       "Name",
+      "Tamil Name",
+      "Barcode",
+      "Variants",
       "Type",
       "Description",
       "Category",
@@ -2922,6 +3149,15 @@ export default function POSBilling() {
     const rows = inventoryProducts.map((p) => [
       p.id,
       p.name,
+      p.tamilName || "",
+      p.barcode || "",
+      // e.g. "S: 4 @ ₹499 [890123] | M: 2"
+      (p.variants ?? [])
+        .map(
+          (v) =>
+            `${v.name}${v.stock !== null ? `: ${v.stock}` : ""}${v.price !== null ? ` @ ₹${v.price}` : ""}${v.barcode ? ` [${v.barcode}]` : ""}`,
+        )
+        .join(" | "),
       p.itemType === "SERVICE" ? "SERVICE" : "PRODUCT",
       p.desc || "",
       p.category || "",
@@ -3004,6 +3240,7 @@ export default function POSBilling() {
                   </p>
                   <p className="text-sm font-bold text-black truncate">
                     {stockAdjustTarget.name}
+                    {stockAdjustVariant && ` (${stockAdjustVariant.name})`}
                   </p>
                   {stockAdjustTarget.hsnCode && (
                     <p className="text-[10px] font-mono text-black/45 mt-0.5">
@@ -3016,13 +3253,40 @@ export default function POSBilling() {
                     Current Stock
                   </p>
                   <p className="text-lg font-black text-black leading-tight">
-                    {stockAdjustTarget.stock ?? 0}
+                    {stockAdjustCurrent}
                     <span className="text-[10px] font-bold text-black/45 ml-1">
                       units
                     </span>
                   </p>
                 </div>
               </div>
+              {(stockAdjustTarget.variants?.length ?? 0) > 0 && (
+                <div>
+                  <p className="text-[9px] font-black uppercase tracking-widest text-black/50 mb-2">
+                    Variant <span className="text-red-500">*</span>
+                  </p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {stockAdjustTarget.variants!.map((v) => (
+                      <button
+                        key={v.id}
+                        type="button"
+                        onClick={() => {
+                          setStockAdjustVariantId(v.id);
+                          setStockAdjustQty(stockAdjustType === "RECONCILE" ? v.stock ?? 0 : 0);
+                        }}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition-colors cursor-pointer ${
+                          stockAdjustVariantId === v.id
+                            ? "bg-[var(--accent)] text-[var(--accent-on)] border-[var(--accent)]"
+                            : "bg-white text-black border-black/15 hover:border-[var(--accent)]"
+                        }`}
+                      >
+                        {v.name}
+                        <span className="opacity-60 font-semibold ml-1">· {v.stock ?? 0}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
               {/* Adjustment type */}
               <div>
                 <p className="text-[9px] font-black uppercase tracking-widest text-black/50 mb-2">
@@ -3045,7 +3309,7 @@ export default function POSBilling() {
                         onClick={() => {
                           setStockAdjustType(key);
                           setStockAdjustQty(
-                            key === "RECONCILE" ? stockAdjustTarget.stock ?? 0 : 0,
+                            key === "RECONCILE" ? stockAdjustCurrent : 0,
                           );
                         }}
                         className={`flex flex-col items-center justify-center gap-1 rounded-xl border px-2 py-3 transition-all cursor-pointer ${
@@ -3157,7 +3421,7 @@ export default function POSBilling() {
                 <span className="text-black/55">
                   Current:{" "}
                   <span className="text-black font-black">
-                    {stockAdjustTarget.stock ?? 0}
+                    {stockAdjustCurrent}
                   </span>
                   <span className="mx-1.5">→</span>
                   New Stock:{" "}
@@ -3360,7 +3624,7 @@ export default function POSBilling() {
       {/* Catalog Modal */}
       {showCatalogModal && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-[0_20px_60px_rgba(0,0,0,0.3)] border border-black/10 w-full max-w-md overflow-hidden transform animate-in zoom-in-95 duration-200">
+          <div className="bg-white rounded-2xl shadow-[0_20px_60px_rgba(0,0,0,0.3)] border border-black/10 w-full max-w-2xl overflow-hidden transform animate-in zoom-in-95 duration-200">
             {/* Header */}
             <div className="px-6 py-5 bg-white border-b border-black/10 flex justify-between items-center">
               <div className="flex items-center gap-3">
@@ -3453,6 +3717,37 @@ export default function POSBilling() {
                   onChange={(e) => setNewCatName(e.target.value)}
                   autoFocus
                 />
+              </div>
+
+              <div className={`grid grid-cols-1 gap-3 ${newCatType === "PRODUCT" ? "sm:grid-cols-2" : ""}`}>
+                <div>
+                  <label className="block text-[10px] font-bold text-gray-600 uppercase tracking-widest mb-1.5">
+                    Tamil Name (Optional)
+                  </label>
+                  <input
+                    type="text"
+                    lang="ta"
+                    placeholder={newCatType === "SERVICE" ? "e.g., தையல் கூலி" : "e.g., காட்டன் சட்டை"}
+                    className="w-full bg-white border border-gray-200 hover:border-gray-300 focus:border-[var(--accent)] rounded-lg px-3.5 py-2.5 text-sm font-semibold text-black focus:outline-none transition-colors shadow-xs"
+                    value={newCatTamil}
+                    onChange={(e) => setNewCatTamil(e.target.value)}
+                  />
+                </div>
+                {newCatType === "PRODUCT" && (
+                  <div>
+                    <label className="block text-[10px] font-bold text-gray-600 uppercase tracking-widest mb-1.5">
+                      Barcode (Optional)
+                    </label>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      placeholder="e.g., 8901234567"
+                      className="w-full bg-white border border-gray-200 hover:border-gray-300 focus:border-[var(--accent)] rounded-lg px-3.5 py-2.5 text-sm font-semibold text-black focus:outline-none transition-colors shadow-xs"
+                      value={newCatBarcode}
+                      onChange={(e) => setNewCatBarcode(e.target.value)}
+                    />
+                  </div>
+                )}
               </div>
 
               <div>
@@ -3564,19 +3859,31 @@ export default function POSBilling() {
                     <label className="block text-[10px] font-bold text-gray-600 uppercase tracking-widest mb-1.5">
                       Current Stock
                     </label>
-                    <input
-                      type="number"
-                      min="0"
-                      placeholder="0"
-                      className="w-full bg-white border border-gray-200 hover:border-gray-300 focus:border-[var(--accent)] rounded-lg px-3.5 py-2.5 text-sm font-bold text-black focus:outline-none transition-colors shadow-xs"
-                      value={newCatStock}
-                      onWheel={(e) => e.currentTarget.blur()}
-                      onChange={(e) =>
-                        setNewCatStock(
-                          e.target.value === "" ? "" : parseFloat(e.target.value),
-                        )
-                      }
-                    />
+                    {newCatHasVariants ? (
+                      <div
+                        className="w-full bg-gray-50 border border-gray-200 rounded-lg px-3.5 py-2.5 text-sm font-bold text-black"
+                        title="Stock is the total of all variants"
+                      >
+                        {newCatVariants.reduce((acc, v) => acc + (Number(v.stock) || 0), 0)}
+                        <span className="text-[9px] font-bold text-gray-400 uppercase tracking-wider ml-1.5">
+                          All variants
+                        </span>
+                      </div>
+                    ) : (
+                      <input
+                        type="number"
+                        min="0"
+                        placeholder="0"
+                        className="w-full bg-white border border-gray-200 hover:border-gray-300 focus:border-[var(--accent)] rounded-lg px-3.5 py-2.5 text-sm font-bold text-black focus:outline-none transition-colors shadow-xs"
+                        value={newCatStock}
+                        onWheel={(e) => e.currentTarget.blur()}
+                        onChange={(e) =>
+                          setNewCatStock(
+                            e.target.value === "" ? "" : parseFloat(e.target.value),
+                          )
+                        }
+                      />
+                    )}
                   </div>
                 )}
               </div>
@@ -3680,6 +3987,163 @@ export default function POSBilling() {
                   on the invoice.
                 </p>
               </div>
+
+              {/* Variants (products) / options (services) */}
+              {(() => {
+                const isService = newCatType === "SERVICE";
+                const cols = isService
+                  ? "sm:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)_minmax(0,1fr)_auto]"
+                  : "sm:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,0.8fr)_minmax(0,1.3fr)_auto]";
+                const cell =
+                  "w-full min-w-0 bg-white border border-gray-200 hover:border-gray-300 focus:border-[var(--accent)] rounded-lg px-3 py-2 text-sm font-semibold text-black focus:outline-none transition-colors";
+                return (
+                  <div className="border border-gray-200 rounded-xl p-3.5 space-y-3">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const next = !newCatHasVariants;
+                        setNewCatHasVariants(next);
+                        if (next && newCatVariants.length === 0) setNewCatVariants([newVariantDraft()]);
+                      }}
+                      className="w-full flex items-start justify-between gap-3 text-left cursor-pointer"
+                      aria-pressed={newCatHasVariants}
+                    >
+                      <span>
+                        <span className="text-[10px] font-bold text-gray-700 uppercase tracking-widest flex items-center gap-1.5">
+                          <Tag className="w-3.5 h-3.5" />
+                          {isService ? "Service Options (Types / Levels)" : "Multi-Variant Product (Sizes, Colours, SKUs)"}
+                        </span>
+                        <span className="block text-[10px] text-gray-400 font-semibold mt-1">
+                          {isService
+                            ? "Enable if this service has options at different prices (e.g. Basic, Designer)"
+                            : "Enable if this product comes in multiple sizes (e.g. S, M, L, XL) or colours"}
+                        </span>
+                      </span>
+                      <span
+                        className={`w-5 h-5 rounded flex items-center justify-center border shrink-0 transition-colors ${
+                          newCatHasVariants
+                            ? "bg-[var(--accent)] border-[var(--accent)] text-white"
+                            : "bg-white border-gray-300 text-transparent"
+                        }`}
+                      >
+                        <Check className="w-3.5 h-3.5" />
+                      </span>
+                    </button>
+
+                    {newCatHasVariants && (
+                      <>
+                        <div className="bg-gray-50 rounded-xl p-3 space-y-2">
+                          <div
+                            className={`hidden sm:grid ${cols} gap-2 text-[9px] font-black text-gray-500 uppercase tracking-widest px-1`}
+                          >
+                            <span>{isService ? "Option" : "Variant"}</span>
+                            <span>Price (₹)</span>
+                            <span>Cost (₹)</span>
+                            {!isService && <span>Stock</span>}
+                            {!isService && <span>Barcode</span>}
+                            <span className="w-8" />
+                          </div>
+                          {newCatVariants.map((v, idx) => (
+                            <div
+                              key={v.key}
+                              className={`grid grid-cols-2 ${cols} gap-2 items-center pb-2 sm:pb-0 border-b sm:border-0 border-gray-200 last:border-0`}
+                            >
+                              <input
+                                type="text"
+                                placeholder={isService ? `Option ${idx + 1}` : `e.g., M / Red`}
+                                aria-label={`${isService ? "Option" : "Variant"} ${idx + 1} name`}
+                                className={`${cell} col-span-2 sm:col-span-1`}
+                                value={v.name}
+                                onChange={(e) => updateVariantDraft(v.key, { name: e.target.value })}
+                              />
+                              <input
+                                type="number"
+                                min="0"
+                                placeholder={newCatPrice === "" ? "Price" : String(newCatPrice)}
+                                aria-label="Variant price"
+                                className={cell}
+                                value={v.price}
+                                onWheel={(e) => e.currentTarget.blur()}
+                                onChange={(e) =>
+                                  updateVariantDraft(v.key, {
+                                    price: e.target.value === "" ? "" : parseFloat(e.target.value),
+                                  })
+                                }
+                              />
+                              <input
+                                type="number"
+                                min="0"
+                                placeholder={newCatCost === "" ? "Cost" : String(newCatCost)}
+                                aria-label="Variant cost"
+                                className={cell}
+                                value={v.cost}
+                                onWheel={(e) => e.currentTarget.blur()}
+                                onChange={(e) =>
+                                  updateVariantDraft(v.key, {
+                                    cost: e.target.value === "" ? "" : parseFloat(e.target.value),
+                                  })
+                                }
+                              />
+                              {!isService && (
+                                <input
+                                  type="number"
+                                  min="0"
+                                  placeholder="Stock"
+                                  aria-label="Variant stock"
+                                  className={`${cell} font-bold`}
+                                  value={v.stock}
+                                  onWheel={(e) => e.currentTarget.blur()}
+                                  onChange={(e) =>
+                                    updateVariantDraft(v.key, {
+                                      stock: e.target.value === "" ? "" : parseFloat(e.target.value),
+                                    })
+                                  }
+                                />
+                              )}
+                              {!isService && (
+                                <input
+                                  type="text"
+                                  inputMode="numeric"
+                                  placeholder="Barcode"
+                                  aria-label="Variant barcode"
+                                  className={cell}
+                                  value={v.barcode}
+                                  onChange={(e) => updateVariantDraft(v.key, { barcode: e.target.value })}
+                                />
+                              )}
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setNewCatVariants((prev) => prev.filter((x) => x.key !== v.key))
+                                }
+                                className="w-8 h-8 justify-self-end flex items-center justify-center rounded-lg text-gray-400 hover:text-[#DC2626] hover:bg-[#DC2626]/10 transition-colors cursor-pointer"
+                                title="Remove this variant"
+                                aria-label="Remove this variant"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setNewCatVariants((prev) => [...prev, newVariantDraft()])}
+                          className="text-[10px] font-bold text-gray-700 uppercase tracking-widest border border-dashed border-gray-300 hover:border-[var(--accent)] hover:text-[var(--accent)] rounded-lg px-4 py-2.5 flex items-center gap-1.5 transition-colors cursor-pointer"
+                        >
+                          <Plus className="w-3.5 h-3.5" /> Add {isService ? "Option" : "Variant"}
+                        </button>
+                        <p className="text-[9px] text-gray-400 font-semibold">
+                          Blank price or cost uses the {isService ? "service" : "product"}&apos;s original / cost
+                          price.
+                          {!isService && " Product stock is the total of all variants."}
+                          {(Number(newCatOfferPct) > 0 || newCatOfferPrice !== "") &&
+                            " The offer % applies to every variant's price."}
+                        </p>
+                      </>
+                    )}
+                  </div>
+                );
+              })()}
 
               {/* Visibility in the Billing Panel */}
               <button
@@ -4506,75 +4970,36 @@ export default function POSBilling() {
                                   </div>
                                   <div className="max-h-48 overflow-y-auto">
                                     {(() => {
-                                      const list = catalog.filter(
-                                        (c) =>
-                                          (activeCategory === "ALL" ||
-                                            (c.category || "General") ===
-                                              activeCategory) &&
-                                          (c.isActive === undefined ||
-                                            c.isActive) &&
-                                          c.name
-                                            .toLowerCase()
-                                            .includes(
-                                              catalogSearch.toLowerCase(),
-                                            ),
+                                      const list = catalogPicks(
+                                        catalog.filter(
+                                          (c) =>
+                                            (activeCategory === "ALL" ||
+                                              (c.category || "General") ===
+                                                activeCategory) &&
+                                            (c.isActive === undefined ||
+                                              c.isActive),
+                                        ),
+                                      ).filter((pick) =>
+                                        pickMatches(pick, catalogSearch),
                                       );
                                       return list.length > 0 ? (
-                                        list.map((catItem) => {
+                                        list.map((pick) => {
+                                          const catItem = pick.item;
                                           return (
                                             <div
-                                              key={catItem.id}
+                                              key={pick.key}
                                               className="w-full flex items-center border-b border-transparent last:border-0 hover:bg-[#FFFFFF] transition-colors"
                                             >
                                               <button
                                                 className="flex-1 text-left px-4 py-2.5 flex flex-col cursor-pointer"
                                                 onClick={() => {
-                                                  updateItem(
-                                                    item.id,
-                                                    "name",
-                                                    catItem.name,
-                                                  );
-                                                  updateItem(
-                                                    item.id,
-                                                    "desc",
-                                                    catItem.desc || "",
-                                                  );
-                                                  updateItem(
-                                                    item.id,
-                                                    "product_id",
-                                                    catItem.productId ||
-                                                      catItem.id,
-                                                  );
-                                                  const onOffer =
-                                                    (catItem.offerPct ?? 0) > 0 &&
-                                                    (catItem.offerPrice ?? 0) > 0;
-                                                  if (catItem.price !== undefined) {
-                                                    updateItem(
-                                                      item.id,
-                                                      "price",
-                                                      onOffer
-                                                        ? (catItem.offerPrice as number)
-                                                        : catItem.price,
-                                                    );
-                                                  }
-                                                  updateItem(
-                                                    item.id,
-                                                    "offerPct",
-                                                    onOffer
-                                                      ? (catItem.offerPct as number)
-                                                      : 0,
-                                                  );
-                                                  updateItem(
-                                                    item.id,
-                                                    "originalPrice",
-                                                    onOffer ? catItem.price : undefined,
-                                                  );
+                                                  applyCatalogPick(item.id, pick, updateItem);
                                                   setActiveCatalogRowId(null);
                                                 }}
                                               >
                                                 <div className="flex justify-between items-center w-full">
                                                   <span className="text-xs font-bold text-[#000000] flex items-center gap-1.5">
-                                                    {catItem.name}
+                                                    {pick.label}
                                                     {catItem.itemType === "SERVICE" && (
                                                       <span className="text-[8px] font-black uppercase tracking-widest text-[var(--accent-strong)] bg-[var(--accent-strong)]/10 border border-[var(--accent-strong)]/25 px-1.5 py-0.5 rounded">
                                                         Service
@@ -4587,17 +5012,24 @@ export default function POSBilling() {
                                                     )}
                                                   </span>
                                                 </div>
+                                                {catItem.tamilName && (
+                                                  <span className="text-[11px] font-semibold text-[#000000]/60 mt-0.5">
+                                                    {catItem.tamilName}
+                                                  </span>
+                                                )}
                                                 {catItem.desc && (
                                                   <span className="text-[10px] font-semibold uppercase tracking-wider text-[#000000] mt-0.5">
                                                     {catItem.desc}
                                                   </span>
                                                 )}
-                                                {catItem.price !==
-                                                  undefined && (
-                                                  <span className="text-[10px] font-bold text-[var(--accent)] mt-0.5">
-                                                    ₹{catItem.price}
-                                                  </span>
-                                                )}
+                                                <span className="text-[10px] font-bold text-[var(--accent)] mt-0.5">
+                                                  ₹{pick.price}
+                                                  {pick.variant && pick.variant.stock !== null && (
+                                                    <span className="text-[#000000]/45 font-semibold ml-1.5">
+                                                      · {pick.variant.stock} in stock
+                                                    </span>
+                                                  )}
+                                                </span>
                                               </button>
                                               <div className="flex shrink-0">
                                                 <button
@@ -8069,9 +8501,21 @@ export default function POSBilling() {
                                         {isExpanded ? "▲ Hide Details" : "▼ Open in detail"}
                                       </span>
                                     </div>
+                                    {p.tamilName && (
+                                      <div className="text-xs font-semibold text-[#000000]/60 mt-0.5">
+                                        {p.tamilName}
+                                      </div>
+                                    )}
                                     {p.desc && (
                                       <div className="text-[10px] font-semibold text-[#000000]/60 mt-0.5">
                                         {p.desc}
+                                      </div>
+                                    )}
+                                    {(p.variants?.length ?? 0) > 0 && (
+                                      <div className="text-[9px] font-bold uppercase tracking-wider text-[var(--accent)] mt-0.5">
+                                        {p.variants!.length} {p.itemType === "SERVICE" ? "option" : "variant"}
+                                        {p.variants!.length === 1 ? "" : "s"}:{" "}
+                                        {p.variants!.map((v) => v.name).join(", ")}
                                       </div>
                                     )}
                                   </div>
@@ -8244,6 +8688,67 @@ export default function POSBilling() {
                                           {p.category || "General"}
                                         </div>
                                       </div>
+                                      {p.tamilName && (
+                                        <div>
+                                          <div className="text-[9px] font-bold text-black/40 uppercase tracking-wider mb-0.5">
+                                            Tamil Name
+                                          </div>
+                                          <div className="font-bold text-black">{p.tamilName}</div>
+                                        </div>
+                                      )}
+                                      {p.barcode && (
+                                        <div>
+                                          <div className="text-[9px] font-bold text-black/40 uppercase tracking-wider mb-0.5">
+                                            Barcode
+                                          </div>
+                                          <div className="font-mono font-bold text-black">{p.barcode}</div>
+                                        </div>
+                                      )}
+                                      {(p.variants?.length ?? 0) > 0 && (
+                                        <div className="col-span-2 sm:col-span-3">
+                                          <div className="text-[9px] font-bold text-black/40 uppercase tracking-wider mb-1.5">
+                                            {p.itemType === "SERVICE" ? "Options" : "Variants"}
+                                          </div>
+                                          <div className="overflow-x-auto border border-black/10 rounded-lg">
+                                            <table className="w-full text-left text-xs">
+                                              <thead className="bg-[#FAFAFA] text-[9px] font-black uppercase tracking-wider text-black/60">
+                                                <tr>
+                                                  <th className="px-3 py-2">Name</th>
+                                                  <th className="px-3 py-2 text-right">Price</th>
+                                                  <th className="px-3 py-2 text-right">Cost</th>
+                                                  {p.itemType !== "SERVICE" && (
+                                                    <th className="px-3 py-2 text-right">Stock</th>
+                                                  )}
+                                                  {p.itemType !== "SERVICE" && (
+                                                    <th className="px-3 py-2">Barcode</th>
+                                                  )}
+                                                </tr>
+                                              </thead>
+                                              <tbody className="divide-y divide-black/5">
+                                                {p.variants!.map((v) => (
+                                                  <tr key={v.id}>
+                                                    <td className="px-3 py-2 font-bold text-black">{v.name}</td>
+                                                    <td className="px-3 py-2 text-right font-semibold">
+                                                      ₹{(v.price ?? p.price ?? 0).toLocaleString("en-IN")}
+                                                    </td>
+                                                    <td className="px-3 py-2 text-right font-semibold text-black/60">
+                                                      ₹{(v.costPrice ?? p.costPrice ?? 0).toLocaleString("en-IN")}
+                                                    </td>
+                                                    {p.itemType !== "SERVICE" && (
+                                                      <td className="px-3 py-2 text-right font-black">{v.stock ?? 0}</td>
+                                                    )}
+                                                    {p.itemType !== "SERVICE" && (
+                                                      <td className="px-3 py-2 font-mono text-black/60">
+                                                        {v.barcode || "—"}
+                                                      </td>
+                                                    )}
+                                                  </tr>
+                                                ))}
+                                              </tbody>
+                                            </table>
+                                          </div>
+                                        </div>
+                                      )}
                                       {p.desc && (
                                         <div className="col-span-2 sm:col-span-3">
                                           <div className="text-[9px] font-bold text-black/40 uppercase tracking-wider mb-0.5">

@@ -1,7 +1,7 @@
 "use server";
 
 import { dbStore } from "@/lib/dbStore";
-import { Product, OrderWithRelations, CartItem, Expense, PaymentMode, Category, AdvanceOrderWithRelations, AdvanceOrderStatus, ShopSettings, ItemType, Staff, AttendanceRecord, AttendanceStatus, StockMovement, StockMovementType } from "@/lib/types";
+import { Product, OrderWithRelations, CartItem, Expense, PaymentMode, Category, AdvanceOrderWithRelations, AdvanceOrderStatus, ShopSettings, ItemType, Staff, AttendanceRecord, AttendanceStatus, StockMovement, StockMovementType, ProductVariantInput } from "@/lib/types";
 import { getShopSettings, saveShopSettings, normalizeHex, DEFAULT_ACCENT } from "@/lib/shopSettings";
 
 // Helper to serialize Date objects from Postgres to strings
@@ -56,13 +56,31 @@ const num = (v: unknown, fallback = 0): number => {
 const numOrNull = (v: unknown): number | null =>
   v === null || v === undefined || v === "" ? null : num(v);
 
-export async function createProduct(data: { name: string; description: string | null; category: string; gst_rate: number; hsn_code: string | null; selling_price: number; item_type?: ItemType; cost_price?: number; current_stock?: number | null; low_stock_alert?: number | null; offer_discount_pct?: number; offer_price?: number | null; is_active?: boolean }): Promise<Product> {
+/** Trim names, drop blank rows and coerce numbers; blank price / cost stay null (= parent's). */
+function cleanVariants(variants: ProductVariantInput[] | null | undefined): ProductVariantInput[] {
+  return (variants ?? [])
+    .map((v) => ({
+      id: v.id || undefined,
+      name: (v.name || "").trim(),
+      price: v.price === null || (v.price as unknown) === "" ? null : Math.max(0, num(v.price)),
+      cost_price:
+        v.cost_price === null || (v.cost_price as unknown) === "" ? null : Math.max(0, num(v.cost_price)),
+      stock: v.stock === null ? null : Math.max(0, num(v.stock)),
+      barcode: (v.barcode || "").trim() || null,
+    }))
+    .filter((v) => v.name);
+}
+
+export async function createProduct(data: { name: string; description: string | null; category: string; gst_rate: number; hsn_code: string | null; selling_price: number; item_type?: ItemType; cost_price?: number; current_stock?: number | null; low_stock_alert?: number | null; offer_discount_pct?: number; offer_price?: number | null; is_active?: boolean; tamil_name?: string | null; barcode?: string | null; variants?: ProductVariantInput[] | null }): Promise<Product> {
   const name = data.name.trim();
   if (!name) throw new Error("Product name is required");
   return serialize(
     await dbStore.addProduct({
       ...data,
       name,
+      tamil_name: data.tamil_name?.trim() || null,
+      barcode: data.barcode?.trim() || null,
+      variants: cleanVariants(data.variants),
       category: data.category.trim() || "General",
       gst_rate: Math.max(0, num(data.gst_rate)),
       selling_price: Math.max(0, num(data.selling_price)),
@@ -75,8 +93,24 @@ export async function createProduct(data: { name: string; description: string | 
   );
 }
 
-export async function editProduct(id: string, data: Partial<Product>): Promise<Product | null> {
-  return serialize(await dbStore.updateProduct(id, data));
+/** `variants` (from the product form) replaces the variant list; omit it to leave variants alone. */
+export async function editProduct(
+  id: string,
+  data: Partial<Product>,
+  variants?: ProductVariantInput[],
+): Promise<Product | null> {
+  const patch: Partial<Product> = { ...data };
+  delete patch.variants;
+  if (patch.tamil_name !== undefined) patch.tamil_name = patch.tamil_name?.trim() || null;
+  if (patch.barcode !== undefined) patch.barcode = patch.barcode?.trim() || null;
+  return serialize(
+    await dbStore.updateProduct(
+      id,
+      patch,
+      undefined,
+      variants === undefined ? undefined : cleanVariants(variants),
+    ),
+  );
 }
 
 export async function removeProduct(id: string): Promise<void> {
@@ -98,9 +132,19 @@ export async function adjustProductStock(
     newStock: number;
     lowStockAlert?: number | null;
     note?: string | null;
+    /** Adjust one variant of a variant product instead of the product itself. */
+    variantId?: string | null;
   },
 ): Promise<Product | null> {
   if (!ADJUST_TYPES.includes(data.type)) throw new Error(`Invalid adjustment type: ${data.type}`);
+  if (data.variantId) {
+    return serialize(
+      await dbStore.setVariantStock(data.variantId, data.newStock, {
+        type: data.type,
+        note: data.note ?? null,
+      }),
+    );
+  }
   const patch: Partial<Product> = { current_stock: Math.max(0, num(data.newStock)) };
   if (data.lowStockAlert !== undefined) patch.low_stock_alert = numOrNull(data.lowStockAlert);
   return serialize(
@@ -207,6 +251,7 @@ export async function createAdvanceOrder(payload: {
   gstAmount: number;
   items: {
     product_id: string | null;
+    variant_id?: string | null;
     snapshot_name: string;
     snapshot_desc: string | null;
     snapshot_price: number;

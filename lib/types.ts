@@ -23,6 +23,35 @@ export type Product = {
   offer_price: number | null; // Price billed when an offer is active
   is_active: boolean; // Visible in the Billing Panel picker
   created_at: string;
+  tamil_name?: string | null; // shown under the name in pickers and search
+  barcode?: string | null; // scannable code; variants carry their own
+  has_variants?: boolean; // stock then lives on the variants; current_stock is their total
+  variants?: ProductVariant[];
+};
+
+/**
+ * A size / colour / SKU of a product, or an option of a service. Blank price
+ * or cost falls back to the parent's. Service options never carry stock.
+ */
+export type ProductVariant = {
+  id: string;
+  product_id: string;
+  name: string;
+  price: number | null;
+  cost_price: number | null;
+  stock: number | null;
+  barcode: string | null;
+  sort_order: number;
+};
+
+/** A variant as sent from the product form; no id means a new row. */
+export type ProductVariantInput = {
+  id?: string;
+  name: string;
+  price: number | null;
+  cost_price: number | null;
+  stock: number | null;
+  barcode: string | null;
 };
 
 /** The price a catalogue row should bill at, honouring an automatic offer. */
@@ -103,6 +132,7 @@ export type OrderItemRow = {
   id: string;
   order_id: string;
   product_id: string | null;
+  variant_id?: string | null;
   snapshot_name: string;
   snapshot_price: number;
   quantity: number;
@@ -159,6 +189,7 @@ export type AdvanceOrderItemRow = {
   id: string;
   advance_order_id: string;
   product_id: string | null;
+  variant_id?: string | null;
   snapshot_name: string;
   snapshot_desc: string | null;
   snapshot_price: number;
@@ -197,6 +228,7 @@ export type AttendanceRecord = {
 export type CartItem = {
   id: string;
   product_id: string | null;
+  variant_id?: string | null;
   name: string;
   desc: string;
   price: number;

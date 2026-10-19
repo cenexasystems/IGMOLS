@@ -192,6 +192,23 @@ CREATE TABLE IF NOT EXISTS staff_attendance (
 
 CREATE INDEX IF NOT EXISTS idx_staff_attendance_date ON staff_attendance (attendance_date);
 
+-- PRODUCT VARIANTS (sizes / colours / SKUs; options for services) ---------
+-- products.tamil_name, products.barcode, products.has_variants and the
+-- variant_id columns on order_items / advance_order_items are added by the
+-- app on first run (lib/dbStore.ts ensureProductSchema).
+CREATE TABLE IF NOT EXISTS product_variants (
+  id          TEXT PRIMARY KEY,
+  product_id  TEXT NOT NULL REFERENCES products (id) ON DELETE CASCADE,
+  name        TEXT NOT NULL,
+  price       NUMERIC,                  -- NULL = product price
+  cost_price  NUMERIC,                  -- NULL = product cost
+  stock       NUMERIC,                  -- NULL for service options
+  barcode     TEXT,
+  sort_order  INTEGER NOT NULL DEFAULT 0,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_product_variants_product ON product_variants (product_id);
+
 -- STOCK MOVEMENTS (audit ledger; quantity is signed: + in / − out) --------
 CREATE TABLE IF NOT EXISTS stock_movements (
   id            TEXT PRIMARY KEY,

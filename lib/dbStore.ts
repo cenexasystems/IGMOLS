@@ -19,6 +19,8 @@ import {
   AttendanceStatus,
   StockMovement,
   StockMovementType,
+  ProductVariant,
+  ProductVariantInput,
 } from './types';
 import { advanceCharges } from './advanceCharges';
 
@@ -165,6 +167,128 @@ async function recordMovement(input: {
   }
 }
 
+const numOrNull = (v: unknown): number | null =>
+  v === null || v === undefined || v === '' ? null : Number(v);
+
+const toVariant = (r: Record<string, unknown>): ProductVariant => ({
+  id: r.id as string,
+  product_id: r.product_id as string,
+  name: r.name as string,
+  price: numOrNull(r.price),
+  cost_price: numOrNull(r.cost_price),
+  stock: numOrNull(r.stock),
+  barcode: (r.barcode as string) || null,
+  sort_order: Number(r.sort_order) || 0,
+});
+
+/** Same stale-id guard as filterLiveProductIds, for variant links. */
+async function filterLiveVariantIds(ids: (string | null | undefined)[]): Promise<Set<string>> {
+  const wanted = ids.filter((id): id is string => Boolean(id));
+  const live = new Set<string>();
+  if (wanted.length === 0) return live;
+  const existing = await sql`SELECT id FROM product_variants WHERE id = ANY(${wanted})`;
+  for (const row of existing as unknown as { id: string }[]) live.add(row.id);
+  return live;
+}
+
+/** Products carry their variants (empty for single-SKU items). */
+async function attachVariants(products: Product[]): Promise<Product[]> {
+  const ids = products.filter((p) => p.has_variants).map((p) => p.id);
+  const byProduct = new Map<string, ProductVariant[]>();
+  if (ids.length > 0) {
+    const rows = await sql`
+      SELECT * FROM product_variants WHERE product_id = ANY(${ids})
+      ORDER BY sort_order ASC, created_at ASC
+    `;
+    for (const r of rows as Record<string, unknown>[]) {
+      const v = toVariant(r);
+      byProduct.set(v.product_id, [...(byProduct.get(v.product_id) ?? []), v]);
+    }
+  }
+  return products.map((p) => ({ ...p, variants: byProduct.get(p.id) ?? [] }));
+}
+
+/** Stock of a variant product is always the total of its variants. */
+async function syncVariantTotal(productId: string): Promise<void> {
+  await sql`
+    UPDATE products
+    SET current_stock = (SELECT COALESCE(SUM(stock), 0) FROM product_variants WHERE product_id = ${productId})
+    WHERE id = ${productId} AND item_type = 'PRODUCT'
+  `;
+}
+
+/**
+ * Replace a product's variant list with the form's list: update rows that kept
+ * their id, insert new ones, delete the rest. Every stock change is logged per
+ * variant. Services keep their options but never hold stock.
+ */
+async function saveVariants(
+  product: { id: string; name: string; item_type: ItemType },
+  variants: ProductVariantInput[],
+): Promise<void> {
+  const isService = product.item_type === 'SERVICE';
+  const existing = (
+    (await sql`SELECT * FROM product_variants WHERE product_id = ${product.id}`) as Record<string, unknown>[]
+  ).map(toVariant);
+  const keep = new Set(variants.map((v) => v.id).filter(Boolean));
+  const label = (name: string) => `${product.name} (${name})`;
+
+  for (const old of existing) {
+    if (keep.has(old.id)) continue;
+    await sql`DELETE FROM product_variants WHERE id = ${old.id}`;
+    if (!isService) {
+      await recordMovement({
+        productId: product.id,
+        productName: label(old.name),
+        type: 'EDIT',
+        before: old.stock ?? 0,
+        after: 0,
+        note: 'Variant removed',
+      });
+    }
+  }
+
+  for (const [index, v] of variants.entries()) {
+    const stock = isService ? null : Math.max(0, Number(v.stock) || 0);
+    const old = v.id ? existing.find((e) => e.id === v.id) : undefined;
+    if (old) {
+      await sql`
+        UPDATE product_variants
+        SET name = ${v.name}, price = ${v.price}, cost_price = ${v.cost_price},
+            stock = ${stock}, barcode = ${v.barcode}, sort_order = ${index}
+        WHERE id = ${old.id}
+      `;
+      if (!isService) {
+        await recordMovement({
+          productId: product.id,
+          productName: label(v.name),
+          type: 'EDIT',
+          before: old.stock ?? 0,
+          after: stock ?? 0,
+        });
+      }
+    } else {
+      await sql`
+        INSERT INTO product_variants (id, product_id, name, price, cost_price, stock, barcode, sort_order)
+        VALUES (${uid()}, ${product.id}, ${v.name}, ${v.price}, ${v.cost_price}, ${stock}, ${v.barcode}, ${index})
+      `;
+      if (!isService) {
+        await recordMovement({
+          productId: product.id,
+          productName: label(v.name),
+          type: 'OPENING',
+          before: 0,
+          after: stock ?? 0,
+          note: 'Opening stock',
+        });
+      }
+    }
+  }
+
+  await sql`UPDATE products SET has_variants = ${variants.length > 0} WHERE id = ${product.id}`;
+  if (!isService && variants.length > 0) await syncVariantTotal(product.id);
+}
+
 export const dbStore = {
   // CATEGORIES
   async listCategories(): Promise<Category[]> {
@@ -223,6 +347,27 @@ export const dbStore = {
       // invoice can show the discount that was actually applied.
       await sql`ALTER TABLE order_items ADD COLUMN IF NOT EXISTS offer_pct NUMERIC NOT NULL DEFAULT 0`;
       await sql`ALTER TABLE order_items ADD COLUMN IF NOT EXISTS original_price NUMERIC`;
+      // Tamil name, barcode and size / colour variants.
+      await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS tamil_name TEXT`;
+      await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS barcode TEXT`;
+      await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS has_variants BOOLEAN NOT NULL DEFAULT false`;
+      await sql`
+        CREATE TABLE IF NOT EXISTS product_variants (
+          id          TEXT PRIMARY KEY,
+          product_id  TEXT NOT NULL REFERENCES products (id) ON DELETE CASCADE,
+          name        TEXT NOT NULL,
+          price       NUMERIC,
+          cost_price  NUMERIC,
+          stock       NUMERIC,
+          barcode     TEXT,
+          sort_order  INTEGER NOT NULL DEFAULT 0,
+          created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+      `;
+      await sql`CREATE INDEX IF NOT EXISTS idx_product_variants_product ON product_variants (product_id)`;
+      // No FK: a sold line keeps its variant id after the variant is deleted.
+      await sql`ALTER TABLE order_items ADD COLUMN IF NOT EXISTS variant_id TEXT`;
+      await sql`ALTER TABLE advance_order_items ADD COLUMN IF NOT EXISTS variant_id TEXT`;
       productSchemaChecked = true;
     } catch (err) {
       console.error('Failed to ensure product schema:', err);
@@ -232,13 +377,14 @@ export const dbStore = {
   async listProducts(): Promise<Product[]> {
     await this.ensureProductSchema();
     const rows = await sql`SELECT * FROM products ORDER BY name ASC`;
-    return rows as Product[];
+    return attachVariants(rows as Product[]);
   },
 
   async getProduct(id: string): Promise<Product | null> {
     await this.ensureProductSchema();
     const rows = await sql`SELECT * FROM products WHERE id = ${id}`;
-    return rows.length > 0 ? (rows[0] as Product) : null;
+    if (rows.length === 0) return null;
+    return (await attachVariants([rows[0] as Product]))[0];
   },
 
   async addProduct(input: {
@@ -255,29 +401,40 @@ export const dbStore = {
     offer_discount_pct?: number;
     offer_price?: number | null;
     is_active?: boolean;
+    tamil_name?: string | null;
+    barcode?: string | null;
+    variants?: ProductVariantInput[] | null;
   }): Promise<Product> {
     await this.ensureProductSchema();
     const id = uid();
     // Services never hold stock, so those columns are always written as NULL.
     const isService = input.item_type === 'SERVICE';
+    const variants = input.variants ?? [];
+    const hasVariants = variants.length > 0;
     const rows = await sql`
       INSERT INTO products (
         id, name, description, category, gst_rate, hsn_code, selling_price,
         item_type, cost_price, current_stock, low_stock_alert,
-        offer_discount_pct, offer_price, is_active
+        offer_discount_pct, offer_price, is_active, tamil_name, barcode, has_variants
       )
       VALUES (
         ${id}, ${input.name}, ${input.description}, ${input.category},
         ${input.gst_rate}, ${input.hsn_code}, ${input.selling_price},
         ${isService ? 'SERVICE' : 'PRODUCT'}, ${input.cost_price ?? 0},
-        ${isService ? null : input.current_stock ?? 0},
+        ${isService ? null : hasVariants ? 0 : input.current_stock ?? 0},
         ${isService ? null : input.low_stock_alert ?? 0},
         ${input.offer_discount_pct ?? 0}, ${input.offer_price ?? null},
-        ${input.is_active ?? true}
+        ${input.is_active ?? true}, ${input.tamil_name ?? null}, ${input.barcode ?? null},
+        ${hasVariants}
       )
       RETURNING *
     `;
     const product = rows[0] as Product;
+    if (hasVariants) {
+      // Opening stock is logged per variant.
+      await saveVariants(product, variants);
+      return (await this.getProduct(id)) as Product;
+    }
     if (!isService) {
       await recordMovement({
         productId: product.id,
@@ -288,7 +445,7 @@ export const dbStore = {
         note: 'Opening stock',
       });
     }
-    return product;
+    return { ...product, variants: [] };
   },
 
   /**
@@ -299,11 +456,18 @@ export const dbStore = {
     id: string,
     patch: Partial<Product>,
     movement?: { type: StockMovementType; note?: string | null },
+    /** The full variant list from the product form; undefined leaves variants as they are. */
+    variants?: ProductVariantInput[],
   ): Promise<Product | null> {
     await this.ensureProductSchema();
-    if (Object.keys(patch).length === 0) return this.getProduct(id);
+    if (Object.keys(patch).length === 0 && variants === undefined) return this.getProduct(id);
 
-    const previous = patch.current_stock !== undefined ? await this.getProduct(id) : null;
+    const previous = await this.getProduct(id);
+    if (!previous) return null;
+    // A variant product's stock is the total of its variants, so a plain
+    // current_stock patch (e.g. from the Settings quick editor) is ignored.
+    const variantMode = variants !== undefined ? variants.length > 0 : Boolean(previous.has_variants);
+    if (variantMode) delete patch.current_stock;
 
     // We update fields individually since dynamic SET with Neon SQL template tag is tricky
     if (patch.name !== undefined) await sql`UPDATE products SET name = ${patch.name} WHERE id = ${id}`;
@@ -317,6 +481,8 @@ export const dbStore = {
     if (patch.offer_discount_pct !== undefined) await sql`UPDATE products SET offer_discount_pct = ${patch.offer_discount_pct} WHERE id = ${id}`;
     if (patch.offer_price !== undefined) await sql`UPDATE products SET offer_price = ${patch.offer_price} WHERE id = ${id}`;
     if (patch.is_active !== undefined) await sql`UPDATE products SET is_active = ${patch.is_active} WHERE id = ${id}`;
+    if (patch.tamil_name !== undefined) await sql`UPDATE products SET tamil_name = ${patch.tamil_name} WHERE id = ${id}`;
+    if (patch.barcode !== undefined) await sql`UPDATE products SET barcode = ${patch.barcode} WHERE id = ${id}`;
 
     // Stock is meaningless for services — switching the type to SERVICE clears it.
     if (
@@ -335,14 +501,27 @@ export const dbStore = {
       }
     }
 
-    const rows = await sql`SELECT * FROM products WHERE id = ${id}`;
-    const updated = rows.length > 0 ? (rows[0] as Product) : null;
-    if (previous && updated && updated.item_type === 'PRODUCT' && previous.item_type === 'PRODUCT') {
+    if (variants !== undefined) {
+      const current = await sql`SELECT id, name, item_type FROM products WHERE id = ${id}`;
+      if (current.length > 0) {
+        await saveVariants(current[0] as { id: string; name: string; item_type: ItemType }, variants);
+      }
+    }
+
+    const updated = await this.getProduct(id);
+    // Variant stock changes were logged per variant. When variants are dropped,
+    // their removal already took stock to 0, so the new count is logged from 0.
+    if (
+      patch.current_stock !== undefined &&
+      updated &&
+      updated.item_type === 'PRODUCT' &&
+      previous.item_type === 'PRODUCT'
+    ) {
       await recordMovement({
         productId: id,
         productName: updated.name,
         type: movement?.type ?? 'EDIT',
-        before: Number(previous.current_stock) || 0,
+        before: previous.has_variants ? 0 : Number(previous.current_stock) || 0,
         after: Number(updated.current_stock) || 0,
         note: movement?.note ?? null,
       });
@@ -350,15 +529,78 @@ export const dbStore = {
     return updated;
   },
 
+  /** Stock-adjust dialog for one variant: set its count and log why. */
+  async setVariantStock(
+    variantId: string,
+    newStock: number,
+    movement: { type: StockMovementType; note?: string | null },
+  ): Promise<Product | null> {
+    await this.ensureProductSchema();
+    const rows = (await sql`
+      SELECT v.*, p.name AS product_name FROM product_variants v
+      JOIN products p ON p.id = v.product_id
+      WHERE v.id = ${variantId} AND p.item_type = 'PRODUCT'
+    `) as Record<string, unknown>[];
+    if (rows.length === 0) return null;
+    const variant = toVariant(rows[0]);
+    const after = Math.max(0, Number(newStock) || 0);
+    await sql`UPDATE product_variants SET stock = ${after} WHERE id = ${variantId}`;
+    await syncVariantTotal(variant.product_id);
+    await recordMovement({
+      productId: variant.product_id,
+      productName: `${rows[0].product_name as string} (${variant.name})`,
+      type: movement.type,
+      before: variant.stock ?? 0,
+      after,
+      note: movement.note ?? null,
+    });
+    return this.getProduct(variant.product_id);
+  },
+
   /** Adjust stock after a completed sale. Services are skipped (stock is NULL). */
-  async decrementStock(productId: string, qty: number, orderId?: string): Promise<void> {
+  async decrementStock(
+    productId: string,
+    qty: number,
+    orderId?: string,
+    variantId?: string | null,
+  ): Promise<void> {
     try {
+      if (variantId) {
+        const sold = (await sql`
+          WITH prev AS (
+            SELECT v.id, v.stock FROM product_variants v
+            JOIN products p ON p.id = v.product_id
+            WHERE v.id = ${variantId} AND v.product_id = ${productId}
+              AND p.item_type = 'PRODUCT' AND v.stock IS NOT NULL
+            FOR UPDATE OF v
+          )
+          UPDATE product_variants v
+          SET stock = GREATEST(0, prev.stock - ${Number(qty) || 0})
+          FROM prev
+          WHERE v.id = prev.id
+          RETURNING v.name, prev.stock AS before, v.stock AS after
+        `) as { name: string; before: number; after: number }[];
+        if (sold.length > 0) {
+          await syncVariantTotal(productId);
+          const parent = (await sql`SELECT name FROM products WHERE id = ${productId}`) as { name: string }[];
+          await recordMovement({
+            productId,
+            productName: `${parent[0]?.name ?? 'Product'} (${sold[0].name})`,
+            type: 'SALE',
+            before: sold[0].before,
+            after: sold[0].after,
+            reference: orderId ?? null,
+          });
+          return;
+        }
+      }
       // The row lock makes `prev` the count this update actually started from,
       // even when two bills sell the same product at once.
       const rows = (await sql`
         WITH prev AS (
           SELECT id, current_stock FROM products
           WHERE id = ${productId} AND item_type = 'PRODUCT' AND current_stock IS NOT NULL
+            AND has_variants = false
           FOR UPDATE
         )
         UPDATE products p
@@ -545,8 +787,12 @@ export const dbStore = {
     );
 
     // Same stale-id guard as the regular sale path.
+    await this.ensureProductSchema();
     const liveProductIds = await filterLiveProductIds(
       payload.items.map((item) => item.product_id),
+    );
+    const liveVariantIds = await filterLiveVariantIds(
+      payload.items.map((item) => item.variant_id),
     );
 
     // Each cart line becomes one order item, snapshotting its name and price.
@@ -554,6 +800,7 @@ export const dbStore = {
       order_id: payload.orderId,
       product_id:
         item.product_id && liveProductIds.has(item.product_id) ? item.product_id : null,
+      variant_id: item.variant_id && liveVariantIds.has(item.variant_id) ? item.variant_id : null,
       snapshot_name: item.name,
       snapshot_price: item.price,
       quantity: item.qty,
@@ -588,10 +835,10 @@ export const dbStore = {
       finalOrderItems.map((oi) =>
         sql`
           INSERT INTO order_items (
-            id, order_id, product_id, snapshot_name, snapshot_price, quantity, offer_pct,
+            id, order_id, product_id, variant_id, snapshot_name, snapshot_price, quantity, offer_pct,
             original_price
           ) VALUES (
-            ${uid()}, ${oi.order_id}, ${oi.product_id},
+            ${uid()}, ${oi.order_id}, ${oi.product_id}, ${oi.variant_id ?? null},
             ${oi.snapshot_name}, ${oi.snapshot_price}, ${oi.quantity}, ${oi.offer_pct},
             ${oi.original_price}
           )
@@ -604,7 +851,14 @@ export const dbStore = {
     await Promise.all(
       payload.items
         .filter((item) => item.product_id)
-        .map((item) => this.decrementStock(item.product_id as string, item.qty, payload.orderId)),
+        .map((item) =>
+          this.decrementStock(
+            item.product_id as string,
+            item.qty,
+            payload.orderId,
+            item.variant_id && liveVariantIds.has(item.variant_id) ? item.variant_id : null,
+          ),
+        ),
     );
 
     return { orderId: payload.orderId };
@@ -689,6 +943,7 @@ export const dbStore = {
     gstAmount: number;
     items: {
       product_id: string | null;
+      variant_id?: string | null;
       snapshot_name: string;
       snapshot_desc: string | null;
       snapshot_price: number;
@@ -696,6 +951,7 @@ export const dbStore = {
     }[];
   }): Promise<{ advanceOrderId: string }> {
     await this.ensureAdvanceSchema();
+    await this.ensureProductSchema();
     await ensurePaymentSchema();
     const customer = await this.upsertCustomer(
       payload.customerName,
@@ -724,15 +980,18 @@ export const dbStore = {
     const liveProductIds = await filterLiveProductIds(
       payload.items.map((it) => it.product_id),
     );
+    const liveVariantIds = await filterLiveVariantIds(payload.items.map((it) => it.variant_id));
 
     await Promise.all(
       payload.items.map((it) =>
         sql`
           INSERT INTO advance_order_items (
-            id, advance_order_id, product_id, snapshot_name, snapshot_desc, snapshot_price, quantity
+            id, advance_order_id, product_id, variant_id, snapshot_name, snapshot_desc,
+            snapshot_price, quantity
           ) VALUES (
             ${uid()}, ${payload.advanceOrderId},
             ${it.product_id && liveProductIds.has(it.product_id) ? it.product_id : null},
+            ${it.variant_id && liveVariantIds.has(it.variant_id) ? it.variant_id : null},
             ${it.snapshot_name}, ${it.snapshot_desc}, ${it.snapshot_price}, ${it.quantity}
           )
         `,
@@ -803,6 +1062,8 @@ export const dbStore = {
         it.product_id && liveProductIds.has(it.product_id)
           ? it.product_id
           : productIdByName.get(it.snapshot_name.trim().toLowerCase()) ?? null,
+      // submitOrder drops a variant link that no longer exists.
+      variant_id: it.product_id && liveProductIds.has(it.product_id) ? it.variant_id ?? null : null,
       name: it.snapshot_name,
       desc: it.snapshot_desc || '',
       price: Number(it.snapshot_price),
