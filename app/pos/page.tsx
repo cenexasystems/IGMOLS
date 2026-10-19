@@ -68,6 +68,7 @@ import {
   createProduct,
   editProduct,
   removeProduct,
+  adjustProductStock,
   fetchExpenses,
   createExpense,
   editExpense,
@@ -90,6 +91,7 @@ import SettingsPanel from "./SettingsPanel";
 import AttendancePanel from "./AttendancePanel";
 import StaffPunch from "./StaffPunch";
 import LowStockAlarm, { type LowStockItem } from "./LowStockAlarm";
+import StockMovementsPanel from "./StockMovementsPanel";
 import { advanceCharges } from "@/lib/advanceCharges";
 
 // Preset expense categories (users can also type a custom one)
@@ -751,6 +753,7 @@ export default function POSBilling() {
 
   const [isSavingCatalog, setIsSavingCatalog] = useState<boolean>(false); // guards Save Product against double-clicks
   const [inventorySearch, setInventorySearch] = useState<string>("");
+  const [inventoryView, setInventoryView] = useState<"products" | "movements">("products");
 
   // Category management (create / rename / delete)
   const [showCategoryModal, setShowCategoryModal] = useState(false);
@@ -815,13 +818,15 @@ export default function POSBilling() {
 
     setIsSavingStock(true);
     try {
-      await editProduct(target.id, {
-        current_stock: stockAdjustPreview,
+      await adjustProductStock(target.id, {
+        type: stockAdjustType,
+        newStock: stockAdjustPreview,
         // Reconcile is an exact count, so align the low-stock warning with it too.
-        low_stock_alert:
+        lowStockAlert:
           stockAdjustType === "RECONCILE"
             ? Math.min(target.lowStockAlert ?? 0, stockAdjustPreview)
             : target.lowStockAlert ?? undefined,
+        note: stockAdjustNote,
       });
       await fetchData();
       setStockAdjustTarget(null);
@@ -7667,6 +7672,31 @@ export default function POSBilling() {
 
         {role === "admin" && activeTab === "inventory" && (
           <div className="flex-1 flex flex-col max-w-[1400px] mx-auto w-full pb-8 pr-2 animate-in fade-in duration-300">
+            <div className="bg-white border border-black/10 rounded-2xl p-2 mb-6 flex flex-wrap items-center gap-1 w-full sm:w-fit">
+              {(
+                [
+                  { key: "products", label: "Products & Stock", Icon: Boxes },
+                  { key: "movements", label: "Stock Movements", Icon: History },
+                ] as const
+              ).map(({ key, label, Icon }) => (
+                <button
+                  key={key}
+                  onClick={() => setInventoryView(key)}
+                  className={`flex-1 sm:flex-none px-4 py-2 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
+                    inventoryView === key
+                      ? "bg-[var(--accent)] text-[var(--accent-on)] shadow-sm"
+                      : "text-[#000000]/70 hover:bg-[var(--accent-softer)] hover:text-[#000000]"
+                  }`}
+                >
+                  <Icon className="w-4 h-4" /> {label}
+                </button>
+              ))}
+            </div>
+
+            {inventoryView === "movements" ? (
+              <StockMovementsPanel onExportSnapshot={exportInventoryCSV} />
+            ) : (
+            <>
             <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 mb-6">
               <div>
                 <h2 className="text-[28px] font-black text-[#000000] tracking-tight flex items-center gap-3">
@@ -8035,6 +8065,8 @@ export default function POSBilling() {
                   </table>
                 </div>
               </div>
+            )}
+            </>
             )}
           </div>
         )}

@@ -17,6 +17,8 @@ import {
   Staff,
   AttendanceRecord,
   AttendanceStatus,
+  StockMovement,
+  StockMovementType,
 } from './types';
 import { advanceCharges } from './advanceCharges';
 
@@ -25,6 +27,7 @@ let productSchemaChecked = false;
 let customerSchemaChecked = false;
 let attendanceSchemaChecked = false;
 let advanceSchemaChecked = false;
+let movementSchemaChecked = false;
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
@@ -77,6 +80,63 @@ async function ensureCustomerSchema(): Promise<void> {
     customerSchemaChecked = true;
   } catch (err) {
     console.error('Failed to ensure customer schema:', err);
+  }
+}
+
+async function ensureMovementSchema(): Promise<void> {
+  if (movementSchemaChecked) return;
+  try {
+    await sql`
+      CREATE TABLE IF NOT EXISTS stock_movements (
+        id            TEXT PRIMARY KEY,
+        product_id    TEXT REFERENCES products (id) ON DELETE SET NULL,
+        product_name  TEXT NOT NULL,
+        movement_type TEXT NOT NULL,
+        quantity      NUMERIC NOT NULL,
+        stock_before  NUMERIC NOT NULL,
+        stock_after   NUMERIC NOT NULL,
+        reference     TEXT,
+        note          TEXT,
+        created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `;
+    await sql`CREATE INDEX IF NOT EXISTS idx_stock_movements_created ON stock_movements (created_at DESC)`;
+    movementSchemaChecked = true;
+  } catch (err) {
+    console.error('Failed to ensure stock movement schema:', err);
+  }
+}
+
+/**
+ * Append one row to the movement ledger. Logging must never block the stock
+ * change itself (especially a sale), so failures are reported and swallowed.
+ * No-op when the count did not actually change.
+ */
+async function recordMovement(input: {
+  productId: string;
+  productName: string;
+  type: StockMovementType;
+  before: number;
+  after: number;
+  reference?: string | null;
+  note?: string | null;
+}): Promise<void> {
+  const before = Number(input.before) || 0;
+  const after = Number(input.after) || 0;
+  if (before === after) return;
+  try {
+    await ensureMovementSchema();
+    await sql`
+      INSERT INTO stock_movements (
+        id, product_id, product_name, movement_type, quantity,
+        stock_before, stock_after, reference, note
+      ) VALUES (
+        ${uid()}, ${input.productId}, ${input.productName}, ${input.type}, ${after - before},
+        ${before}, ${after}, ${input.reference ?? null}, ${input.note?.trim() || null}
+      )
+    `;
+  } catch (err) {
+    console.error(`Failed to record stock movement for ${input.productId}:`, err);
   }
 }
 
@@ -192,12 +252,33 @@ export const dbStore = {
       )
       RETURNING *
     `;
-    return rows[0] as Product;
+    const product = rows[0] as Product;
+    if (!isService) {
+      await recordMovement({
+        productId: product.id,
+        productName: product.name,
+        type: 'OPENING',
+        before: 0,
+        after: Number(product.current_stock) || 0,
+        note: 'Opening stock',
+      });
+    }
+    return product;
   },
 
-  async updateProduct(id: string, patch: Partial<Product>): Promise<Product | null> {
+  /**
+   * `movement` labels the ledger row written when this patch changes the stock
+   * count; without it the change is logged as a product-form EDIT.
+   */
+  async updateProduct(
+    id: string,
+    patch: Partial<Product>,
+    movement?: { type: StockMovementType; note?: string | null },
+  ): Promise<Product | null> {
     await this.ensureProductSchema();
     if (Object.keys(patch).length === 0) return this.getProduct(id);
+
+    const previous = patch.current_stock !== undefined ? await this.getProduct(id) : null;
 
     // We update fields individually since dynamic SET with Neon SQL template tag is tricky
     if (patch.name !== undefined) await sql`UPDATE products SET name = ${patch.name} WHERE id = ${id}`;
@@ -230,17 +311,47 @@ export const dbStore = {
     }
 
     const rows = await sql`SELECT * FROM products WHERE id = ${id}`;
-    return rows.length > 0 ? (rows[0] as Product) : null;
+    const updated = rows.length > 0 ? (rows[0] as Product) : null;
+    if (previous && updated && updated.item_type === 'PRODUCT' && previous.item_type === 'PRODUCT') {
+      await recordMovement({
+        productId: id,
+        productName: updated.name,
+        type: movement?.type ?? 'EDIT',
+        before: Number(previous.current_stock) || 0,
+        after: Number(updated.current_stock) || 0,
+        note: movement?.note ?? null,
+      });
+    }
+    return updated;
   },
 
   /** Adjust stock after a completed sale. Services are skipped (stock is NULL). */
-  async decrementStock(productId: string, qty: number): Promise<void> {
+  async decrementStock(productId: string, qty: number, orderId?: string): Promise<void> {
     try {
-      await sql`
-        UPDATE products
-        SET current_stock = GREATEST(0, COALESCE(current_stock, 0) - ${Number(qty) || 0})
-        WHERE id = ${productId} AND item_type = 'PRODUCT' AND current_stock IS NOT NULL
-      `;
+      // The row lock makes `prev` the count this update actually started from,
+      // even when two bills sell the same product at once.
+      const rows = (await sql`
+        WITH prev AS (
+          SELECT id, current_stock FROM products
+          WHERE id = ${productId} AND item_type = 'PRODUCT' AND current_stock IS NOT NULL
+          FOR UPDATE
+        )
+        UPDATE products p
+        SET current_stock = GREATEST(0, prev.current_stock - ${Number(qty) || 0})
+        FROM prev
+        WHERE p.id = prev.id
+        RETURNING p.name, prev.current_stock AS before, p.current_stock AS after
+      `) as { name: string; before: number; after: number }[];
+      if (rows.length > 0) {
+        await recordMovement({
+          productId,
+          productName: rows[0].name,
+          type: 'SALE',
+          before: rows[0].before,
+          after: rows[0].after,
+          reference: orderId ?? null,
+        });
+      }
     } catch (err) {
       console.error(`Failed to decrement stock for ${productId}:`, err);
     }
@@ -248,6 +359,18 @@ export const dbStore = {
 
   async deleteProduct(id: string): Promise<void> {
     await sql`DELETE FROM products WHERE id = ${id}`;
+  },
+
+  // STOCK MOVEMENTS
+  async listStockMovements(): Promise<StockMovement[]> {
+    await ensureMovementSchema();
+    const rows = await sql`SELECT * FROM stock_movements ORDER BY created_at DESC LIMIT 5000`;
+    return (rows as StockMovement[]).map((r) => ({
+      ...r,
+      quantity: Number(r.quantity),
+      stock_before: Number(r.stock_before),
+      stock_after: Number(r.stock_after),
+    }));
   },
 
   // CUSTOMERS
@@ -454,7 +577,7 @@ export const dbStore = {
     await Promise.all(
       payload.items
         .filter((item) => item.product_id)
-        .map((item) => this.decrementStock(item.product_id as string, item.qty)),
+        .map((item) => this.decrementStock(item.product_id as string, item.qty, payload.orderId)),
     );
 
     return { orderId: payload.orderId };

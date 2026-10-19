@@ -1,7 +1,7 @@
 "use server";
 
 import { dbStore } from "@/lib/dbStore";
-import { Product, OrderWithRelations, CartItem, Expense, PaymentMode, Category, AdvanceOrderWithRelations, AdvanceOrderStatus, ShopSettings, ItemType, Staff, AttendanceRecord, AttendanceStatus } from "@/lib/types";
+import { Product, OrderWithRelations, CartItem, Expense, PaymentMode, Category, AdvanceOrderWithRelations, AdvanceOrderStatus, ShopSettings, ItemType, Staff, AttendanceRecord, AttendanceStatus, StockMovement, StockMovementType } from "@/lib/types";
 import { getShopSettings, saveShopSettings, normalizeHex, DEFAULT_ACCENT } from "@/lib/shopSettings";
 
 // Helper to serialize Date objects from Postgres to strings
@@ -81,6 +81,31 @@ export async function editProduct(id: string, data: Partial<Product>): Promise<P
 
 export async function removeProduct(id: string): Promise<void> {
   return await dbStore.deleteProduct(id);
+}
+
+// Stock movements
+const ADJUST_TYPES: StockMovementType[] = ["RESTOCK", "RETURN", "LOSS", "RECONCILE"];
+
+export async function fetchStockMovements(): Promise<StockMovement[]> {
+  return serialize(await dbStore.listStockMovements());
+}
+
+/** Stock-adjust dialog: set the new count and log why it changed. */
+export async function adjustProductStock(
+  id: string,
+  data: {
+    type: StockMovementType;
+    newStock: number;
+    lowStockAlert?: number | null;
+    note?: string | null;
+  },
+): Promise<Product | null> {
+  if (!ADJUST_TYPES.includes(data.type)) throw new Error(`Invalid adjustment type: ${data.type}`);
+  const patch: Partial<Product> = { current_stock: Math.max(0, num(data.newStock)) };
+  if (data.lowStockAlert !== undefined) patch.low_stock_alert = numOrNull(data.lowStockAlert);
+  return serialize(
+    await dbStore.updateProduct(id, patch, { type: data.type, note: data.note ?? null }),
+  );
 }
 
 // Orders

@@ -191,6 +191,21 @@ CREATE TABLE IF NOT EXISTS staff_attendance (
 
 CREATE INDEX IF NOT EXISTS idx_staff_attendance_date ON staff_attendance (attendance_date);
 
+-- STOCK MOVEMENTS (audit ledger; quantity is signed: + in / − out) --------
+CREATE TABLE IF NOT EXISTS stock_movements (
+  id            TEXT PRIMARY KEY,
+  product_id    TEXT REFERENCES products (id) ON DELETE SET NULL,
+  product_name  TEXT NOT NULL,          -- snapshot, survives product deletion
+  movement_type TEXT NOT NULL,          -- OPENING | RESTOCK | RETURN | SALE | LOSS | RECONCILE | EDIT
+  quantity      NUMERIC NOT NULL,
+  stock_before  NUMERIC NOT NULL,
+  stock_after   NUMERIC NOT NULL,
+  reference     TEXT,                   -- invoice number for SALE rows
+  note          TEXT,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_stock_movements_created ON stock_movements (created_at DESC);
+
 -- SHOP SETTINGS (single row, id = 'default') -----------------------------
 CREATE TABLE IF NOT EXISTS shop_settings (
   id             TEXT PRIMARY KEY,

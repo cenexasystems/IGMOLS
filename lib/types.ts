@@ -37,6 +37,34 @@ export const effectivePrice = (p: {
   return p.selling_price;
 };
 
+/**
+ * Why a product's stock changed. OPENING is the count entered when the product
+ * was created; EDIT is a stock change made from the product form; SALE is
+ * written automatically by a completed POS bill.
+ */
+export type StockMovementType =
+  | 'OPENING'
+  | 'RESTOCK'
+  | 'RETURN'
+  | 'SALE'
+  | 'LOSS'
+  | 'RECONCILE'
+  | 'EDIT';
+
+/** One row in the stock movement ledger. `quantity` is signed (+in / −out). */
+export type StockMovement = {
+  id: string;
+  product_id: string | null; // NULL once the product is deleted
+  product_name: string; // snapshot, so the ledger survives product deletion
+  movement_type: StockMovementType;
+  quantity: number;
+  stock_before: number;
+  stock_after: number;
+  reference: string | null; // invoice number for SALE rows
+  note: string | null;
+  created_at: string;
+};
+
 export type Customer = {
   id: string;
   name: string;
