@@ -3993,7 +3993,7 @@ export default function POSBilling() {
                 const isService = newCatType === "SERVICE";
                 const cols = isService
                   ? "sm:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)_minmax(0,1fr)_auto]"
-                  : "sm:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,0.8fr)_minmax(0,1.3fr)_auto]";
+                  : "sm:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,0.8fr)_auto]";
                 const cell =
                   "w-full min-w-0 bg-white border border-gray-200 hover:border-gray-300 focus:border-[var(--accent)] rounded-lg px-3 py-2 text-sm font-semibold text-black focus:outline-none transition-colors";
                 return (
@@ -4040,7 +4040,6 @@ export default function POSBilling() {
                             <span>Price (₹)</span>
                             <span>Cost (₹)</span>
                             {!isService && <span>Stock</span>}
-                            {!isService && <span>Barcode</span>}
                             <span className="w-8" />
                           </div>
                           {newCatVariants.map((v, idx) => (
@@ -4098,17 +4097,6 @@ export default function POSBilling() {
                                       stock: e.target.value === "" ? "" : parseFloat(e.target.value),
                                     })
                                   }
-                                />
-                              )}
-                              {!isService && (
-                                <input
-                                  type="text"
-                                  inputMode="numeric"
-                                  placeholder="Barcode"
-                                  aria-label="Variant barcode"
-                                  className={cell}
-                                  value={v.barcode}
-                                  onChange={(e) => updateVariantDraft(v.key, { barcode: e.target.value })}
                                 />
                               )}
                               <button
@@ -8719,9 +8707,6 @@ export default function POSBilling() {
                                                   {p.itemType !== "SERVICE" && (
                                                     <th className="px-3 py-2 text-right">Stock</th>
                                                   )}
-                                                  {p.itemType !== "SERVICE" && (
-                                                    <th className="px-3 py-2">Barcode</th>
-                                                  )}
                                                 </tr>
                                               </thead>
                                               <tbody className="divide-y divide-black/5">
@@ -8736,11 +8721,6 @@ export default function POSBilling() {
                                                     </td>
                                                     {p.itemType !== "SERVICE" && (
                                                       <td className="px-3 py-2 text-right font-black">{v.stock ?? 0}</td>
-                                                    )}
-                                                    {p.itemType !== "SERVICE" && (
-                                                      <td className="px-3 py-2 font-mono text-black/60">
-                                                        {v.barcode || "—"}
-                                                      </td>
                                                     )}
                                                   </tr>
                                                 ))}
