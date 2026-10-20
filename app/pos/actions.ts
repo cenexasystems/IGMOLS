@@ -3,6 +3,7 @@
 import { dbStore } from "@/lib/dbStore";
 import { Product, OrderWithRelations, CartItem, Expense, PaymentMode, Category, AdvanceOrderWithRelations, AdvanceOrderStatus, ShopSettings, ItemType, Staff, AttendanceRecord, AttendanceStatus, StockMovement, StockMovementType, ProductVariantInput } from "@/lib/types";
 import { getShopSettings, saveShopSettings, normalizeHex, DEFAULT_ACCENT } from "@/lib/shopSettings";
+import { normalizePasscode, roleForPasscode, setPasscode, type PosRole } from "@/lib/passcodes";
 
 // Helper to serialize Date objects from Postgres to strings
 function serialize<T>(data: T): T {
@@ -11,19 +12,37 @@ function serialize<T>(data: T): T {
 }
 
 export async function verifyPasscode(enteredPasscode: string): Promise<{ success: boolean; role?: 'staff' | 'admin' }> {
-  const adminPasscode = process.env.ADMIN_PASSCODE || "admin123";
-  const staffPasscode = process.env.STAFF_PASSCODE || process.env.NEXT_PUBLIC_STAFF_PASSCODE || "staff123";
+  const role = await roleForPasscode(enteredPasscode);
+  return role ? { success: true, role } : { success: false };
+}
 
-  const normalizedEntered = enteredPasscode.replace(/\s/g, "");
-
-  if (normalizedEntered === adminPasscode) {
-    return { success: true, role: 'admin' };
+/**
+ * Change the admin or staff login passcode (Settings → Login Passcodes).
+ * The POS has no server session, so every change must carry the current
+ * admin passcode, checked here.
+ */
+export async function changePasscode(data: {
+  role: PosRole;
+  currentAdminPasscode: string;
+  newPasscode: string;
+}): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (data.role !== "admin" && data.role !== "staff") {
+    return { ok: false, error: "Unknown passcode type." };
   }
-  if (normalizedEntered === staffPasscode) {
-    return { success: true, role: 'staff' };
+  if ((await roleForPasscode(data.currentAdminPasscode)) !== "admin") {
+    return { ok: false, error: "The current admin passcode is incorrect." };
   }
-
-  return { success: false };
+  const next = normalizePasscode(data.newPasscode);
+  if (next.length < 4 || next.length > 32) {
+    return { ok: false, error: "Use 4 to 32 characters (spaces are ignored)." };
+  }
+  // Each passcode must open exactly one role.
+  const otherRole = data.role === "admin" ? "staff" : "admin";
+  if ((await roleForPasscode(next)) === otherRole) {
+    return { ok: false, error: "Admin and staff passcodes must be different." };
+  }
+  await setPasscode(data.role, next);
+  return { ok: true };
 }
 
 /**

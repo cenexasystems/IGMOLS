@@ -23,6 +23,10 @@ import {
   Package,
   Pencil,
   Palette,
+  Lock,
+  KeyRound,
+  Eye,
+  EyeOff,
 } from "lucide-react";
 import type { Category, Product, ShopSettings, ItemType } from "@/lib/types";
 import {
@@ -31,7 +35,10 @@ import {
   editProduct,
   removeProduct,
   updateShopSettings,
+  changePasscode,
 } from "@/app/pos/actions";
+
+type PasscodeRole = "admin" | "staff";
 
 import {
   ACCENT_PRESETS,
@@ -596,6 +603,8 @@ export default function SettingsPanel({
           </div>
         </div>
 
+        <PasscodeSettings />
+
         <CatalogueEditor
           products={products}
           categories={categories}
@@ -603,6 +612,191 @@ export default function SettingsPanel({
           onOpenInventory={onOpenInventory}
         />
       </div>
+    </div>
+  );
+}
+
+/* ── Login passcodes (admin / staff) ─────────────────────────────── */
+
+function PasscodeField({
+  id,
+  label,
+  value,
+  onChange,
+  show,
+  autoComplete,
+}: {
+  id: string;
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  show: boolean;
+  autoComplete: "current-password" | "new-password";
+}) {
+  return (
+    <div>
+      <label className={labelCls} htmlFor={id}>
+        {label}
+      </label>
+      <div className="relative">
+        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[#000000]/30 pointer-events-none">
+          <KeyRound className="w-3.5 h-3.5" />
+        </span>
+        <input
+          id={id}
+          type={show ? "text" : "password"}
+          value={value}
+          autoComplete={autoComplete}
+          onChange={(e) => onChange(e.target.value)}
+          className={`${inputCls} pl-9 font-mono`}
+        />
+      </div>
+    </div>
+  );
+}
+
+function PasscodeSettings() {
+  const [current, setCurrent] = useState("");
+  const [show, setShow] = useState(false);
+  const [drafts, setDrafts] = useState<Record<PasscodeRole, { next: string; confirm: string }>>({
+    admin: { next: "", confirm: "" },
+    staff: { next: "", confirm: "" },
+  });
+  const [busy, setBusy] = useState<PasscodeRole | null>(null);
+  const [status, setStatus] = useState<{ role: PasscodeRole; tone: "ok" | "err"; text: string } | null>(
+    null,
+  );
+
+  const setDraft = (role: PasscodeRole, field: "next" | "confirm", value: string) => {
+    setDrafts((prev) => ({ ...prev, [role]: { ...prev[role], [field]: value } }));
+    setStatus(null);
+  };
+
+  const save = async (role: PasscodeRole) => {
+    const { next, confirm } = drafts[role];
+    const fail = (text: string) => setStatus({ role, tone: "err", text });
+    if (!current.trim()) return fail("Enter the current admin passcode first.");
+    if (!next.trim()) return fail("Enter the new passcode.");
+    if (next.replace(/\s/g, "") !== confirm.replace(/\s/g, "")) {
+      return fail("The new passcode and confirmation don't match.");
+    }
+    setBusy(role);
+    try {
+      const result = await changePasscode({
+        role,
+        currentAdminPasscode: current,
+        newPasscode: next,
+      });
+      if (!result.ok) return fail(result.error);
+      setDrafts((prev) => ({ ...prev, [role]: { next: "", confirm: "" } }));
+      // After changing the admin passcode, the old one no longer works.
+      if (role === "admin") setCurrent("");
+      setStatus({
+        role,
+        tone: "ok",
+        text: role === "admin" ? "Admin passcode changed." : "Staff passcode changed.",
+      });
+    } catch (err) {
+      console.error("Failed to change passcode:", err);
+      fail("Could not save. Check your connection and try again.");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="bg-[#FFFFFF] border border-[#000000]/10 rounded-2xl p-5 sm:p-6 shadow-sm">
+      <div className="flex items-start justify-between gap-3 mb-1">
+        <h3 className="text-xs font-black uppercase tracking-widest text-[var(--accent)] flex items-center gap-2">
+          <Lock className="w-4 h-4" /> Login Passcodes
+        </h3>
+        <button
+          type="button"
+          onClick={() => setShow((s) => !s)}
+          className="inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-[#000000]/60 hover:text-[var(--accent)] cursor-pointer"
+        >
+          {show ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+          {show ? "Hide" : "Show"}
+        </button>
+      </div>
+      <p className="text-[10px] text-[#000000]/50 font-semibold mb-5">
+        Change the passcodes used to sign in to the POS. Every change needs the current admin
+        passcode. People already signed in stay signed in.
+      </p>
+
+      <PasscodeField
+        id="pass-current"
+        label="Current Admin Passcode"
+        value={current}
+        onChange={(v) => {
+          setCurrent(v);
+          setStatus(null);
+        }}
+        show={show}
+        autoComplete="current-password"
+      />
+
+      {(
+        [
+          { role: "admin", title: "Admin Passcode", hint: "Full access, including Settings and reports." },
+          { role: "staff", title: "Staff Passcode", hint: "Billing, orders and attendance only." },
+        ] as const
+      ).map(({ role, title, hint }) => (
+        <div key={role} className="mt-5 pt-5 border-t border-[#000000]/10">
+          <p className="text-[11px] font-black uppercase tracking-wider text-[#000000]">
+            New {title}
+          </p>
+          <p className="text-[10px] text-[#000000]/50 font-semibold mb-3">{hint}</p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <PasscodeField
+              id={`pass-${role}-new`}
+              label="New Passcode"
+              value={drafts[role].next}
+              onChange={(v) => setDraft(role, "next", v)}
+              show={show}
+              autoComplete="new-password"
+            />
+            <PasscodeField
+              id={`pass-${role}-confirm`}
+              label="Confirm New Passcode"
+              value={drafts[role].confirm}
+              onChange={(v) => setDraft(role, "confirm", v)}
+              show={show}
+              autoComplete="new-password"
+            />
+          </div>
+          <div className="mt-3 flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={() => save(role)}
+              disabled={busy !== null}
+              className="inline-flex items-center gap-2 bg-[#000000] hover:bg-[#000000]/85 disabled:opacity-50 text-white text-[11px] font-extrabold uppercase tracking-wider px-4 py-2.5 rounded-lg cursor-pointer transition-colors"
+            >
+              {busy === role ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Save className="w-3.5 h-3.5" />
+              )}
+              Change {role === "admin" ? "Admin" : "Staff"} Passcode
+            </button>
+            {status?.role === role && (
+              <span
+                role="status"
+                className={`inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider ${
+                  status.tone === "ok" ? "text-[#15803D]" : "text-[#B91C1C]"
+                }`}
+              >
+                {status.tone === "ok" ? (
+                  <Check className="w-3.5 h-3.5" />
+                ) : (
+                  <AlertCircle className="w-3.5 h-3.5" />
+                )}
+                {status.text}
+              </span>
+            )}
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
