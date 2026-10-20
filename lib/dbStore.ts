@@ -23,14 +23,8 @@ import {
   ProductVariantInput,
 } from './types';
 import { advanceCharges } from './advanceCharges';
+import { ensureSchema } from './schema';
 
-// Reset per process so the idempotent column checks only run once.
-let productSchemaChecked = false;
-let customerSchemaChecked = false;
-let attendanceSchemaChecked = false;
-let advanceSchemaChecked = false;
-let movementSchemaChecked = false;
-let paymentSchemaChecked = false;
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
@@ -68,70 +62,16 @@ async function filterLiveProductIds(ids: (string | null | undefined)[]): Promise
 }
 
 async function ensureCustomerSchema(): Promise<void> {
-  if (customerSchemaChecked) return;
-  try {
-    // If any historical duplicates exist, collapse them onto the oldest row
-    // before the UNIQUE index can be created.
-    await sql`
-      DELETE FROM customers c
-      USING customers d
-      WHERE c.phone = d.phone
-        AND c.id > d.id
-    `;
-    await sql`DROP INDEX IF EXISTS idx_customers_phone`;
-    await sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_phone ON customers (phone)`;
-    customerSchemaChecked = true;
-  } catch (err) {
-    console.error('Failed to ensure customer schema:', err);
-  }
+  return ensureSchema();
 }
 
-/**
- * Card payments: add the split_card column and widen the payment-mode CHECKs
- * (created by schema.sql for CASH / GPAY / SPLIT only) to accept CARD.
- */
+// The per-area ensure* helpers all share one cached migration (lib/schema.ts).
 async function ensurePaymentSchema(): Promise<void> {
-  if (paymentSchemaChecked) return;
-  try {
-    await sql`ALTER TABLE orders ADD COLUMN IF NOT EXISTS split_card NUMERIC NOT NULL DEFAULT 0`;
-    await sql`ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_payment_mode_check`;
-    await sql`
-      ALTER TABLE orders ADD CONSTRAINT orders_payment_mode_check
-      CHECK (payment_mode IN ('CASH', 'GPAY', 'CARD', 'SPLIT'))
-    `;
-    await sql`ALTER TABLE advance_orders DROP CONSTRAINT IF EXISTS advance_orders_deposit_payment_mode_check`;
-    await sql`
-      ALTER TABLE advance_orders ADD CONSTRAINT advance_orders_deposit_payment_mode_check
-      CHECK (deposit_payment_mode IN ('CASH', 'GPAY', 'CARD', 'SPLIT'))
-    `;
-    paymentSchemaChecked = true;
-  } catch (err) {
-    console.error('Failed to ensure payment schema:', err);
-  }
+  return ensureSchema();
 }
 
 async function ensureMovementSchema(): Promise<void> {
-  if (movementSchemaChecked) return;
-  try {
-    await sql`
-      CREATE TABLE IF NOT EXISTS stock_movements (
-        id            TEXT PRIMARY KEY,
-        product_id    TEXT REFERENCES products (id) ON DELETE SET NULL,
-        product_name  TEXT NOT NULL,
-        movement_type TEXT NOT NULL,
-        quantity      NUMERIC NOT NULL,
-        stock_before  NUMERIC NOT NULL,
-        stock_after   NUMERIC NOT NULL,
-        reference     TEXT,
-        note          TEXT,
-        created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
-      )
-    `;
-    await sql`CREATE INDEX IF NOT EXISTS idx_stock_movements_created ON stock_movements (created_at DESC)`;
-    movementSchemaChecked = true;
-  } catch (err) {
-    console.error('Failed to ensure stock movement schema:', err);
-  }
+  return ensureSchema();
 }
 
 /**
@@ -334,44 +274,7 @@ export const dbStore = {
    * list/add/update.
    */
   async ensureProductSchema(): Promise<void> {
-    if (productSchemaChecked) return;
-    try {
-      await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS item_type TEXT NOT NULL DEFAULT 'PRODUCT'`;
-      await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS cost_price NUMERIC NOT NULL DEFAULT 0`;
-      await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS current_stock NUMERIC`;
-      await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS low_stock_alert NUMERIC`;
-      await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS offer_discount_pct NUMERIC NOT NULL DEFAULT 0`;
-      await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS offer_price NUMERIC`;
-      await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT true`;
-      // The offer percentage is snapshotted per invoice line so the printed
-      // invoice can show the discount that was actually applied.
-      await sql`ALTER TABLE order_items ADD COLUMN IF NOT EXISTS offer_pct NUMERIC NOT NULL DEFAULT 0`;
-      await sql`ALTER TABLE order_items ADD COLUMN IF NOT EXISTS original_price NUMERIC`;
-      // Tamil name, barcode and size / colour variants.
-      await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS tamil_name TEXT`;
-      await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS barcode TEXT`;
-      await sql`ALTER TABLE products ADD COLUMN IF NOT EXISTS has_variants BOOLEAN NOT NULL DEFAULT false`;
-      await sql`
-        CREATE TABLE IF NOT EXISTS product_variants (
-          id          TEXT PRIMARY KEY,
-          product_id  TEXT NOT NULL REFERENCES products (id) ON DELETE CASCADE,
-          name        TEXT NOT NULL,
-          price       NUMERIC,
-          cost_price  NUMERIC,
-          stock       NUMERIC,
-          barcode     TEXT,
-          sort_order  INTEGER NOT NULL DEFAULT 0,
-          created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-        )
-      `;
-      await sql`CREATE INDEX IF NOT EXISTS idx_product_variants_product ON product_variants (product_id)`;
-      // No FK: a sold line keeps its variant id after the variant is deleted.
-      await sql`ALTER TABLE order_items ADD COLUMN IF NOT EXISTS variant_id TEXT`;
-      await sql`ALTER TABLE advance_order_items ADD COLUMN IF NOT EXISTS variant_id TEXT`;
-      productSchemaChecked = true;
-    } catch (err) {
-      console.error('Failed to ensure product schema:', err);
-    }
+    return ensureSchema();
   },
 
   async listProducts(): Promise<Product[]> {
@@ -869,19 +772,7 @@ export const dbStore = {
 
   /** Bill-level charge columns; NULL on orders booked before they existed. */
   async ensureAdvanceSchema(): Promise<void> {
-    if (advanceSchemaChecked) return;
-    try {
-      await sql`ALTER TABLE advance_orders ADD COLUMN IF NOT EXISTS discount_type TEXT`;
-      await sql`ALTER TABLE advance_orders ADD COLUMN IF NOT EXISTS discount_value NUMERIC`;
-      await sql`ALTER TABLE advance_orders ADD COLUMN IF NOT EXISTS discount_amount NUMERIC`;
-      await sql`ALTER TABLE advance_orders ADD COLUMN IF NOT EXISTS delivery_fee NUMERIC`;
-      await sql`ALTER TABLE advance_orders ADD COLUMN IF NOT EXISTS is_gst BOOLEAN`;
-      await sql`ALTER TABLE advance_orders ADD COLUMN IF NOT EXISTS gst_percentage NUMERIC`;
-      await sql`ALTER TABLE advance_orders ADD COLUMN IF NOT EXISTS gst_amount NUMERIC`;
-      advanceSchemaChecked = true;
-    } catch (err) {
-      console.error('Failed to ensure advance order schema:', err);
-    }
+    return ensureSchema();
   },
 
   async listAdvanceOrders(): Promise<AdvanceOrderWithRelations[]> {
@@ -1120,36 +1011,7 @@ export const dbStore = {
 
   /** Create the staff tables on first use so existing databases pick them up. */
   async ensureAttendanceSchema(): Promise<void> {
-    if (attendanceSchemaChecked) return;
-    try {
-      await sql`
-        CREATE TABLE IF NOT EXISTS staff (
-          id           TEXT PRIMARY KEY,
-          name         TEXT NOT NULL,
-          role         TEXT NOT NULL DEFAULT '',
-          phone        TEXT NOT NULL DEFAULT '',
-          base_salary  NUMERIC NOT NULL DEFAULT 0,
-          is_active    BOOLEAN NOT NULL DEFAULT TRUE,
-          created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
-        )
-      `;
-      await sql`
-        CREATE TABLE IF NOT EXISTS staff_attendance (
-          id               TEXT PRIMARY KEY,
-          staff_id         TEXT NOT NULL REFERENCES staff (id) ON DELETE CASCADE,
-          attendance_date  DATE NOT NULL,
-          status           TEXT CHECK (status IN ('PRESENT', 'ABSENT', 'HALF_DAY', 'LEAVE')),
-          clock_in         TIMESTAMPTZ,
-          clock_out        TIMESTAMPTZ,
-          updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-          UNIQUE (staff_id, attendance_date)
-        )
-      `;
-      await sql`CREATE INDEX IF NOT EXISTS idx_staff_attendance_date ON staff_attendance (attendance_date)`;
-      attendanceSchemaChecked = true;
-    } catch (err) {
-      console.error('Failed to ensure attendance schema:', err);
-    }
+    return ensureSchema();
   },
 
   async listStaff(): Promise<Staff[]> {

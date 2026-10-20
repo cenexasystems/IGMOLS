@@ -26,6 +26,43 @@ export async function verifyPasscode(enteredPasscode: string): Promise<{ success
   return { success: false };
 }
 
+/**
+ * Everything the POS screen loads on open, in one request. Next.js dispatches
+ * Server Actions one at a time per client, so a client-side Promise.all over
+ * six actions ran as six back-to-back round trips; here they run in parallel.
+ */
+export async function fetchPosData(): Promise<{
+  products: Product[];
+  orders: OrderWithRelations[];
+  expenses: Expense[];
+  categories: Category[];
+  advanceOrders: AdvanceOrderWithRelations[];
+  shopSettings: ShopSettings;
+}> {
+  const [products, orders, expenses, categories, advanceOrders, shopSettings] = await Promise.all([
+    dbStore.listProducts(),
+    dbStore.listOrdersWithRelations(),
+    dbStore.listExpenses(),
+    dbStore.listCategories(),
+    dbStore.listAdvanceOrders(),
+    getShopSettings(),
+  ]);
+  return serialize({ products, orders, expenses, categories, advanceOrders, shopSettings });
+}
+
+/** Staff list plus one day's attendance, in one request (see fetchPosData). */
+export async function fetchStaffDay(date: string): Promise<{
+  staff: Staff[];
+  attendance: AttendanceRecord[];
+}> {
+  const day = assertDate(date);
+  const [staff, attendance] = await Promise.all([
+    dbStore.listStaff(),
+    dbStore.listAttendance(day, day),
+  ]);
+  return serialize({ staff, attendance });
+}
+
 // Categories
 export async function fetchCategories(): Promise<Category[]> {
   return serialize(await dbStore.listCategories());

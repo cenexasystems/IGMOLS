@@ -3,7 +3,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { ChevronLeft, Loader2, LogIn, LogOut, CheckCircle2 } from "lucide-react";
 import type { AttendanceRecord, Staff } from "@/lib/types";
-import { clockInStaff, clockOutStaff, fetchAttendance, fetchStaff } from "@/app/pos/actions";
+import { clockInStaff, clockOutStaff, fetchAttendance, fetchStaffDay } from "@/app/pos/actions";
 import { formatTime, todayIST } from "./AttendancePanel";
 
 type Screen =
@@ -53,8 +53,8 @@ export default function StaffPunch() {
   // Reload whenever the day rolls over (the kiosk may stay open overnight).
   useEffect(() => {
     let cancelled = false;
-    Promise.all([fetchStaff(), fetchAttendance(today, today)])
-      .then(([staffRows, records]) => {
+    fetchStaffDay(today)
+      .then(({ staff: staffRows, attendance: records }) => {
         if (cancelled) return;
         setStaff(staffRows.filter((s) => s.is_active));
         setLoaded({ date: today, records });

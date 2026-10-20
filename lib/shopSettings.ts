@@ -1,4 +1,6 @@
+import { cache } from 'react';
 import { sql } from './db';
+import { ensureSchema } from './schema';
 import type { ShopSettings } from './types';
 import { DEFAULT_SHOP_SETTINGS, DEFAULT_ACCENT, normalizeHex } from './shopProfile';
 
@@ -8,37 +10,6 @@ export { DEFAULT_SHOP_SETTINGS, shopLogoSrc, formatPhone, DEFAULT_ACCENT, ACCENT
 /** Single-row key so the profile is a singleton. */
 const SETTINGS_ID = 'default';
 
-let schemaChecked = false;
-
-/** Create the shop_settings table on first use so no manual migration is needed. */
-async function ensureSchema(): Promise<void> {
-  if (schemaChecked) return;
-  try {
-    await sql`
-      CREATE TABLE IF NOT EXISTS shop_settings (
-        id TEXT PRIMARY KEY,
-        owner_name TEXT NOT NULL DEFAULT '',
-        shop_name TEXT NOT NULL DEFAULT '',
-        tagline TEXT NOT NULL DEFAULT '',
-        phone TEXT NOT NULL DEFAULT '',
-        email TEXT NOT NULL DEFAULT '',
-        address TEXT NOT NULL DEFAULT '',
-        location TEXT NOT NULL DEFAULT '',
-        instagram_url TEXT NOT NULL DEFAULT '',
-        business_hours TEXT NOT NULL DEFAULT '',
-        services TEXT NOT NULL DEFAULT '',
-        gstin TEXT NOT NULL DEFAULT '',
-        logo_data_url TEXT,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-      )
-    `;
-    // Idempotent migration for databases created before theming existed.
-    await sql`ALTER TABLE shop_settings ADD COLUMN IF NOT EXISTS accent_color TEXT NOT NULL DEFAULT '#C50303'`;
-    schemaChecked = true;
-  } catch (err) {
-    console.error('Failed to ensure shop_settings table:', err);
-  }
-}
 
 const toSettings = (row: Record<string, unknown>): ShopSettings => ({
   owner_name: (row.owner_name as string) || DEFAULT_SHOP_SETTINGS.owner_name,
@@ -57,8 +28,11 @@ const toSettings = (row: Record<string, unknown>): ShopSettings => ({
   updated_at: row.updated_at ? String(row.updated_at) : undefined,
 });
 
-/** Read the shop profile, seeding defaults on first run. Never throws. */
-export async function getShopSettings(): Promise<ShopSettings> {
+/**
+ * Read the shop profile, seeding defaults on first run. Never throws.
+ * Cached per request: the root layout's viewport, metadata and body all read it.
+ */
+export const getShopSettings = cache(async (): Promise<ShopSettings> => {
   try {
     await ensureSchema();
     const rows = (await sql`SELECT * FROM shop_settings WHERE id = ${SETTINGS_ID}`) as Record<
@@ -87,7 +61,7 @@ export async function getShopSettings(): Promise<ShopSettings> {
     console.error('Failed to load shop settings:', err);
     return DEFAULT_SHOP_SETTINGS;
   }
-}
+});
 
 /** Upsert the shop profile. */
 export async function saveShopSettings(input: ShopSettings): Promise<ShopSettings> {

@@ -61,7 +61,6 @@ import {
 import {
   verifyPasscode,
   fetchProducts,
-  fetchOrders,
   fetchOrderById,
   submitOrder,
   removeOrder,
@@ -69,7 +68,6 @@ import {
   editProduct,
   removeProduct,
   adjustProductStock,
-  fetchExpenses,
   createExpense,
   editExpense,
   removeExpense,
@@ -77,13 +75,12 @@ import {
   createCategory,
   renameCategory,
   removeCategory,
-  fetchAdvanceOrders,
   createAdvanceOrder,
   cancelAdvanceOrder,
   removeAdvanceOrder,
   finalizeAdvanceOrder,
   setAdvanceOrderStatus,
-  fetchShopSettings,
+  fetchPosData,
 } from "@/app/pos/actions";
 import { Product, Expense, Category, AdvanceOrderWithRelations, AdvanceOrderStatus, ShopSettings, ItemType, effectivePrice } from "@/lib/types";
 import { DEFAULT_SHOP_SETTINGS } from "@/lib/shopProfile";
@@ -775,14 +772,16 @@ export default function POSBilling() {
   const fetchData = async () => {
     setIsRefreshing(true);
     try {
-      const [productsData, ordersData, expensesData, categoriesData, advanceData, shopData] = await Promise.all([
-        fetchProducts(),
-        fetchOrders(),
-        fetchExpenses(),
-        fetchCategories(),
-        fetchAdvanceOrders(),
-        fetchShopSettings(),
-      ]);
+      // One action: actions run one at a time per client, so six separate
+      // calls would queue behind each other.
+      const {
+        products: productsData,
+        orders: ordersData,
+        expenses: expensesData,
+        categories: categoriesData,
+        advanceOrders: advanceData,
+        shopSettings: shopData,
+      } = await fetchPosData();
       setShopSettings(shopData);
       setShopSettingsLoaded(true);
       setAdvanceOrders(
@@ -855,14 +854,8 @@ export default function POSBilling() {
   };
 
   useEffect(() => {
-    // Shop settings load on their own first so the logo and name appear quickly,
-    // without waiting for orders, products and expenses.
-    fetchShopSettings()
-      .then((data) => {
-        setShopSettings(data);
-        setShopSettingsLoaded(true);
-      })
-      .catch((err) => console.error("Error loading shop settings:", err));
+    // Shop settings arrive with the rest of the POS data in one request; a
+    // separate settings call would queue ahead of it (actions run one at a time).
     fetchData();
     if (typeof window !== "undefined" && window.innerWidth < 1024) {
       setIsSidebarOpen(false);
@@ -1231,10 +1224,8 @@ export default function POSBilling() {
       setEditingCategoryId(null);
       setEditCategoryName("");
       // Renaming also updates products, so refresh both lists.
-      await Promise.all([
-        refreshCategories(),
-        fetchProducts().then((data) => setCatalog(data.map(productToCatalogItem))),
-      ]);
+      await refreshCategories();
+      setCatalog((await fetchProducts()).map(productToCatalogItem));
     } catch (err) {
       console.error("Failed to rename category:", err);
       alert("Could not rename the category. Please try again.");
