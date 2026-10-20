@@ -11,7 +11,7 @@ import { sql } from './db';
  * Adding a migration: append statements to `migrations()` and bump
  * SCHEMA_VERSION. Statements must stay idempotent (IF NOT EXISTS etc.).
  */
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 const migrations = () => [
   sql`
@@ -132,6 +132,12 @@ const migrations = () => [
     )
   `,
   sql`CREATE INDEX IF NOT EXISTS idx_staff_attendance_date ON staff_attendance (attendance_date)`,
+  // v2: per-staff POS login and the panels each staff member may open
+  // (NULL panels = the shared staff passcode's panels).
+  sql`ALTER TABLE staff ADD COLUMN IF NOT EXISTS pos_passcode_hash TEXT`,
+  sql`ALTER TABLE staff ADD COLUMN IF NOT EXISTS pos_panels TEXT[]`,
+  // Admin switch: a staff member can sign in only while POS access is on.
+  sql`ALTER TABLE staff ADD COLUMN IF NOT EXISTS pos_enabled BOOLEAN NOT NULL DEFAULT false`,
 
   // Stock movement ledger.
   sql`

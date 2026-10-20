@@ -3,7 +3,22 @@
 import { dbStore } from "@/lib/dbStore";
 import { Product, OrderWithRelations, CartItem, Expense, PaymentMode, Category, AdvanceOrderWithRelations, AdvanceOrderStatus, ShopSettings, ItemType, Staff, AttendanceRecord, AttendanceStatus, StockMovement, StockMovementType, ProductVariantInput } from "@/lib/types";
 import { getShopSettings, saveShopSettings, normalizeHex, DEFAULT_ACCENT } from "@/lib/shopSettings";
-import { normalizePasscode, roleForPasscode, setPasscode, type PosRole } from "@/lib/passcodes";
+import {
+  currentStaffAccess,
+  listStaffAccess,
+  loginForPasscode,
+  normalizePasscode,
+  passcodeOwner,
+  roleForPasscode,
+  setDefaultStaffPanels,
+  setPasscode,
+  setStaffAccess,
+  setStaffPasscode,
+  type PosLogin,
+  type PosRole,
+  type StaffAccessRow,
+} from "@/lib/passcodes";
+import { sanitizePanels, type PosPanel } from "@/lib/posAccess";
 
 // Helper to serialize Date objects from Postgres to strings
 function serialize<T>(data: T): T {
@@ -11,9 +26,60 @@ function serialize<T>(data: T): T {
   return JSON.parse(JSON.stringify(data));
 }
 
-export async function verifyPasscode(enteredPasscode: string): Promise<{ success: boolean; role?: 'staff' | 'admin' }> {
-  const role = await roleForPasscode(enteredPasscode);
-  return role ? { success: true, role } : { success: false };
+export async function verifyPasscode(
+  enteredPasscode: string,
+): Promise<{ success: false } | ({ success: true } & PosLogin)> {
+  const login = await loginForPasscode(enteredPasscode);
+  return login ? { success: true, ...login } : { success: false };
+}
+
+/** On reload: the signed-in staff member's current panels, or null to sign them out. */
+export async function fetchMyAccess(
+  staffId: string | null,
+): Promise<{ staffName: string | null; panels: PosPanel[] } | null> {
+  return await currentStaffAccess(staffId || null);
+}
+
+// Staff access (Settings → Staff Access)
+export async function fetchStaffAccess(): Promise<{ defaultPanels: PosPanel[]; staff: StaffAccessRow[] }> {
+  return serialize(await listStaffAccess());
+}
+
+/** Save the shared staff passcode's panels and each staff member's switch and panels. */
+export async function saveStaffAccess(data: {
+  defaultPanels: PosPanel[];
+  staff: { id: string; enabled: boolean; panels: PosPanel[] }[];
+}): Promise<{ ok: true } | { ok: false; error: string }> {
+  const lists = [data.defaultPanels, ...data.staff.filter((s) => s.enabled).map((s) => s.panels)];
+  if (lists.some((panels) => sanitizePanels(panels).length === 0)) {
+    return { ok: false, error: "Every login that can sign in needs at least one panel." };
+  }
+  await setDefaultStaffPanels(data.defaultPanels);
+  for (const s of data.staff) {
+    await setStaffAccess(s.id, { enabled: Boolean(s.enabled), panels: s.panels });
+  }
+  return { ok: true };
+}
+
+/** Give a staff member their own login passcode, or remove it (newPasscode null). */
+export async function changeStaffPasscode(data: {
+  staffId: string;
+  currentAdminPasscode: string;
+  newPasscode: string | null;
+}): Promise<{ ok: true } | { ok: false; error: string }> {
+  if ((await roleForPasscode(data.currentAdminPasscode)) !== "admin") {
+    return { ok: false, error: "The current admin passcode is incorrect." };
+  }
+  if (data.newPasscode !== null) {
+    const next = normalizePasscode(data.newPasscode);
+    if (next.length < 4 || next.length > 32) {
+      return { ok: false, error: "Use 4 to 32 characters (spaces are ignored)." };
+    }
+    const owner = await passcodeOwner(next, { staffId: data.staffId });
+    if (owner) return { ok: false, error: `That passcode is already used by ${owner}.` };
+  }
+  const saved = await setStaffPasscode(data.staffId, data.newPasscode);
+  return saved ? { ok: true } : { ok: false, error: "Staff member not found." };
 }
 
 /**
@@ -36,11 +102,9 @@ export async function changePasscode(data: {
   if (next.length < 4 || next.length > 32) {
     return { ok: false, error: "Use 4 to 32 characters (spaces are ignored)." };
   }
-  // Each passcode must open exactly one role.
-  const otherRole = data.role === "admin" ? "staff" : "admin";
-  if ((await roleForPasscode(next)) === otherRole) {
-    return { ok: false, error: "Admin and staff passcodes must be different." };
-  }
+  // Each passcode must open exactly one login.
+  const owner = await passcodeOwner(next, { role: data.role });
+  if (owner) return { ok: false, error: `That passcode is already used by ${owner}.` };
   await setPasscode(data.role, next);
   return { ok: true };
 }

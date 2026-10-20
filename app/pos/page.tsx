@@ -60,6 +60,7 @@ import {
 } from "lucide-react";
 import {
   verifyPasscode,
+  fetchMyAccess,
   fetchProducts,
   fetchOrderById,
   submitOrder,
@@ -84,6 +85,7 @@ import {
 } from "@/app/pos/actions";
 import { Product, Expense, Category, AdvanceOrderWithRelations, AdvanceOrderStatus, ShopSettings, ItemType, effectivePrice } from "@/lib/types";
 import { DEFAULT_SHOP_SETTINGS } from "@/lib/shopProfile";
+import type { PosPanel } from "@/lib/posAccess";
 import SettingsPanel from "./SettingsPanel";
 import AttendancePanel from "./AttendancePanel";
 import StaffPunch from "./StaffPunch";
@@ -523,15 +525,25 @@ const SearchableItemInput = ({
 export default function POSBilling() {
   const [isAuthorized, setIsAuthorized] = useState<boolean>(false);
   const [role, setRole] = useState<"staff" | "admin" | null>(null);
+  // Staff see only the panels the admin granted (Settings → Staff Access).
+  const [staffPanels, setStaffPanels] = useState<PosPanel[]>([]);
+  const [staffName, setStaffName] = useState<string | null>(null);
+  const canSee = (panel: string) =>
+    role === "admin" || (role === "staff" && (staffPanels as string[]).includes(panel));
   const [passcode, setPasscode] = useState<string>("");
   const [passcodeError, setPasscodeError] = useState<string>("");
   const [showPasscode, setShowPasscode] = useState<boolean>(false);
   const [isCheckingAuth, setIsCheckingAuth] = useState<boolean>(true);
 
   const [activeCategory, setActiveCategory] = useState<string>("ALL");
-  const [activeTab, setActiveTab] = useState<
+  const [selectedTab, setActiveTab] = useState<
     "billing" | "orders" | "analytics" | "inventory" | "expenses" | "advance" | "attendance" | "settings"
   >("billing");
+  // Staff only ever land on a panel they may open; anything else falls back to their first.
+  const activeTab =
+    role === "staff" && staffPanels.length > 0 && !(staffPanels as string[]).includes(selectedTab)
+      ? staffPanels[0]
+      : selectedTab;
   const [showLowStockAlarm, setShowLowStockAlarm] = useState(false);
   // Shop profile (name, contact details, logo) — editable from the Settings tab.
   const [shopSettings, setShopSettings] = useState<ShopSettings>(DEFAULT_SHOP_SETTINGS);
@@ -675,6 +687,22 @@ export default function POSBilling() {
     window.scrollTo({ top: 0, behavior: "instant" });
   }, [activeTab, analyticsSubTab, analyticsGstFilter]);
 
+  const handleLogout = () => {
+    sessionStorage.removeItem("pos_authorized");
+    localStorage.removeItem("pos_authorized");
+    sessionStorage.removeItem("pos_role");
+    localStorage.removeItem("pos_role");
+    sessionStorage.removeItem("pos_staff_id");
+    sessionStorage.removeItem("pos_staff_name");
+    sessionStorage.removeItem("pos_panels");
+    setStaffPanels([]);
+    setStaffName(null);
+    setRole(null);
+    setPasscode("");
+    setPasscodeError("");
+    setIsAuthorized(false);
+  };
+
   useEffect(() => {
     const prefs = localStorage.getItem("shalistone_print_prefs");
     if (prefs) {
@@ -696,6 +724,25 @@ export default function POSBilling() {
         setRole(storedRole as "staff" | "admin");
         if (storedRole === "staff") {
           setActiveTab("billing");
+          const staffId = sessionStorage.getItem("pos_staff_id");
+          setStaffName(sessionStorage.getItem("pos_staff_name"));
+          try {
+            setStaffPanels(JSON.parse(sessionStorage.getItem("pos_panels") || "[]"));
+          } catch {
+            setStaffPanels([]);
+          }
+          // The admin may have changed this login's panels (or removed it) since.
+          fetchMyAccess(staffId)
+            .then((access) => {
+              if (!access) {
+                handleLogout();
+                return;
+              }
+              setStaffPanels(access.panels);
+              setStaffName(access.staffName);
+              sessionStorage.setItem("pos_panels", JSON.stringify(access.panels));
+            })
+            .catch((err) => console.error("Could not refresh staff access:", err));
         }
       } else {
         setRole("admin");
@@ -705,15 +752,21 @@ export default function POSBilling() {
     setIsCheckingAuth(false);
   }, []);
 
+
   const handleVerifyPasscode = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     const result = await verifyPasscode(passcode);
     if (result && result.success) {
       sessionStorage.setItem("pos_authorized", "true");
-      sessionStorage.setItem("pos_role", result.role || "admin");
-      setRole(result.role as "staff" | "admin");
+      sessionStorage.setItem("pos_role", result.role);
+      setRole(result.role);
       if (result.role === "staff") {
-        setActiveTab("billing");
+        sessionStorage.setItem("pos_staff_id", result.staffId ?? "");
+        sessionStorage.setItem("pos_staff_name", result.staffName ?? "");
+        sessionStorage.setItem("pos_panels", JSON.stringify(result.panels));
+        setStaffPanels(result.panels);
+        setStaffName(result.staffName);
+        setActiveTab(result.panels[0] ?? "billing");
       }
       setIsAuthorized(true);
       setPasscode("");
@@ -723,16 +776,6 @@ export default function POSBilling() {
     }
   };
 
-  const handleLogout = () => {
-    sessionStorage.removeItem("pos_authorized");
-    localStorage.removeItem("pos_authorized");
-    sessionStorage.removeItem("pos_role");
-    localStorage.removeItem("pos_role");
-    setRole(null);
-    setPasscode("");
-    setPasscodeError("");
-    setIsAuthorized(false);
-  };
 
   const productToCatalogItem = (p: Product): CatalogItem => {
     return {
@@ -4213,6 +4256,7 @@ export default function POSBilling() {
 
             {/* Navigation Links */}
             <nav className="px-4 py-6 space-y-2">
+              {canSee("billing") && (
               <button
                 onClick={() => {
                   setActiveTab("billing");
@@ -4229,6 +4273,8 @@ export default function POSBilling() {
                 <Receipt className="w-5 h-5 shrink-0" />
                 Billing Panel
               </button>
+              )}
+              {canSee("advance") && (
               <button
                 onClick={() => {
                   setActiveTab("advance");
@@ -4250,6 +4296,8 @@ export default function POSBilling() {
                   </span>
                 )}
               </button>
+              )}
+              {canSee("orders") && (
               <button
                 onClick={() => {
                   setActiveTab("orders");
@@ -4266,7 +4314,8 @@ export default function POSBilling() {
                 <History className="w-5 h-5 shrink-0" />
                 Order History
               </button>
-              {role === "admin" && (
+              )}
+              {canSee("inventory") && (
                 <button
                   onClick={() => {
                     setActiveTab("inventory");
@@ -4290,7 +4339,7 @@ export default function POSBilling() {
                   )}
                 </button>
               )}
-              {role === "admin" && (
+              {canSee("analytics") && (
                 <button
                   onClick={() => {
                     setActiveTab("analytics");
@@ -4308,7 +4357,7 @@ export default function POSBilling() {
                   Analytics Dashboard
                 </button>
               )}
-              {role === "admin" && (
+              {canSee("expenses") && (
                 <button
                   onClick={() => {
                     setActiveTab("expenses");
@@ -4326,7 +4375,7 @@ export default function POSBilling() {
                   Expense Tracker
                 </button>
               )}
-              {(role === "admin" || role === "staff") && (
+              {canSee("attendance") && (
                 <button
                   onClick={() => {
                     setActiveTab("attendance");
@@ -4378,11 +4427,11 @@ export default function POSBilling() {
           {/* Footer branding */}
           <div className="p-5 border-t border-white/20 bg-white/10 flex items-center gap-3">
             <div className="w-8 h-8 rounded-full bg-white/20 border border-white/30 flex items-center justify-center text-white font-black text-xs uppercase">
-              {role === "admin" ? "A" : "S"}
+              {role === "admin" ? "A" : (staffName || "S").charAt(0)}
             </div>
             <div>
               <span className="text-xs font-bold text-white block uppercase tracking-wider">
-                {role === "admin" ? "Admin Access" : "Staff Access"}
+                {role === "admin" ? "Admin Access" : staffName || "Staff Access"}
               </span>
               <span className="text-[9px] text-white/80 font-bold tracking-wider block">
                 V2.1.0 • PREMIUM POS
@@ -4416,7 +4465,7 @@ export default function POSBilling() {
           </div>
 
           {/* OFFLINE / ONLINE Toggle (only shown when billing tab is active) */}
-          {activeTab === "billing" && (
+          {canSee("billing") && activeTab === "billing" && (
             <div className="flex items-center bg-[#FFFFFF]/60 border border-black/10 rounded-full p-1 shadow-sm">
               <button
                 onClick={() => setIsOnline(false)}
@@ -4717,7 +4766,7 @@ export default function POSBilling() {
           </div>
         )}
 
-        {activeTab === "billing" && (
+        {canSee("billing") && activeTab === "billing" && (
             <div className="flex-1 flex flex-col gap-6 max-w-[1400px] min-w-0 mx-auto w-full">
               {/* Subheader Accent Bar and Title */}
               <div className="flex justify-between items-center py-2 border-b border-black/10 w-full">
@@ -5858,7 +5907,7 @@ export default function POSBilling() {
         )}
 
         {/* ── Advance Orders tab ─────────────────────────────────── */}
-        {activeTab === "advance" && (
+        {canSee("advance") && activeTab === "advance" && (
           <div className="flex-1 flex flex-col max-w-[1400px] mx-auto w-full pb-8 pr-2 animate-in fade-in duration-300">
             {/* Header */}
             <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 mb-6">
@@ -6135,7 +6184,7 @@ export default function POSBilling() {
           </div>
         )}
 
-        {activeTab === "orders" && (
+        {canSee("orders") && activeTab === "orders" && (
           <div className="flex-1 flex flex-col max-w-[1400px] mx-auto w-full pb-8 pr-2 animate-in fade-in duration-300">
             {/* Header Panel */}
             <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 mb-6">
@@ -6480,7 +6529,7 @@ export default function POSBilling() {
           </div>
         )}
 
-        {role === "admin" && activeTab === "analytics" && (
+        {canSee("analytics") && activeTab === "analytics" && (
           <div className="flex-1 flex flex-col max-w-[1400px] min-w-0 mx-auto w-full pb-8 pr-2">
             {/* Header Panel */}
             <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 mb-4">
@@ -7806,7 +7855,7 @@ export default function POSBilling() {
           </div>
         )}
 
-        {role === "admin" && activeTab === "expenses" && (
+        {canSee("expenses") && activeTab === "expenses" && (
           <div className="flex-1 flex flex-col max-w-[1400px] mx-auto w-full pb-8 pr-2 animate-in fade-in duration-300">
             {/* Header */}
             <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 mb-6">
@@ -8292,7 +8341,7 @@ export default function POSBilling() {
           </div>
         )}
 
-        {role === "admin" && activeTab === "inventory" && (
+        {canSee("inventory") && activeTab === "inventory" && (
           <div className="flex-1 flex flex-col max-w-[1400px] mx-auto w-full pb-8 pr-2 animate-in fade-in duration-300">
             <div className="bg-white border border-black/10 rounded-2xl p-2 mb-6 flex flex-wrap items-center gap-1 w-full sm:w-fit">
               {(
@@ -9042,12 +9091,12 @@ export default function POSBilling() {
           </div>
         )}
 
-        {role === "admin" && showLowStockAlarm && lowStockItems.length > 0 && (
+        {canSee("inventory") && showLowStockAlarm && lowStockItems.length > 0 && (
           <LowStockAlarm items={lowStockItems} onClose={() => setShowLowStockAlarm(false)} />
         )}
 
         {/* ── Attendance tab (admin: full panel, staff: punch in/out) ── */}
-        {activeTab === "attendance" &&
+        {canSee("attendance") && activeTab === "attendance" &&
           (role === "admin" ? <AttendancePanel /> : role === "staff" ? <StaffPunch /> : null)}
 
         {/* ── Settings tab (admin only) ─────────────────────────────── */}

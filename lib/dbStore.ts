@@ -1016,7 +1016,11 @@ export const dbStore = {
 
   async listStaff(): Promise<Staff[]> {
     await this.ensureAttendanceSchema();
-    const rows = await sql`SELECT * FROM staff ORDER BY lower(name) ASC`;
+    // Explicit columns: the login passcode hash and panel list never leave the server.
+    const rows = await sql`
+      SELECT id, name, role, phone, base_salary, is_active, created_at
+      FROM staff ORDER BY lower(name) ASC
+    `;
     return (rows as Staff[]).map((s) => ({ ...s, base_salary: Number(s.base_salary) || 0 }));
   },
 
@@ -1031,7 +1035,7 @@ export const dbStore = {
     const rows = await sql`
       INSERT INTO staff (id, name, role, phone, base_salary, is_active)
       VALUES (${uid()}, ${input.name}, ${input.role}, ${input.phone}, ${input.base_salary}, ${input.is_active})
-      RETURNING *
+      RETURNING id, name, role, phone, base_salary, is_active, created_at
     `;
     return rows[0] as Staff;
   },
@@ -1046,7 +1050,7 @@ export const dbStore = {
       SET name = ${input.name}, role = ${input.role}, phone = ${input.phone},
           base_salary = ${input.base_salary}, is_active = ${input.is_active}
       WHERE id = ${id}
-      RETURNING *
+      RETURNING id, name, role, phone, base_salary, is_active, created_at
     `;
     return (rows[0] as Staff) ?? null;
   },

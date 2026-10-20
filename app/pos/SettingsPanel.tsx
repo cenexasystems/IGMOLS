@@ -27,6 +27,7 @@ import {
   KeyRound,
   Eye,
   EyeOff,
+  Users,
 } from "lucide-react";
 import type { Category, Product, ShopSettings, ItemType } from "@/lib/types";
 import {
@@ -36,7 +37,12 @@ import {
   removeProduct,
   updateShopSettings,
   changePasscode,
+  changeStaffPasscode,
+  fetchStaffAccess,
+  saveStaffAccess,
 } from "@/app/pos/actions";
+import { POS_PANELS, sanitizePanels, type PosPanel } from "@/lib/posAccess";
+import type { StaffAccessRow } from "@/lib/passcodes";
 
 type PasscodeRole = "admin" | "staff";
 
@@ -605,6 +611,8 @@ export default function SettingsPanel({
 
         <PasscodeSettings />
 
+        <StaffAccessSettings />
+
         <CatalogueEditor
           products={products}
           categories={categories}
@@ -612,6 +620,362 @@ export default function SettingsPanel({
           onOpenInventory={onOpenInventory}
         />
       </div>
+    </div>
+  );
+}
+
+/* ── Staff access: which panels each login can open ──────────────── */
+
+const SHARED_ROW = "__shared__";
+
+function PanelToggles({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: PosPanel[];
+  onChange: (next: PosPanel[]) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {POS_PANELS.map(({ key, label }) => {
+        const on = value.includes(key);
+        return (
+          <button
+            key={key}
+            type="button"
+            disabled={disabled}
+            aria-pressed={on}
+            onClick={() =>
+              onChange(sanitizePanels(on ? value.filter((k) => k !== key) : [...value, key]))
+            }
+            className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[10px] font-bold uppercase tracking-wider border transition-colors cursor-pointer disabled:opacity-50 ${
+              on
+                ? "bg-[var(--accent)] text-[var(--accent-on)] border-[var(--accent)]"
+                : "bg-white text-[#000000]/55 border-[#000000]/15 hover:border-[var(--accent)]"
+            }`}
+          >
+            {on && <Check className="w-3 h-3" />}
+            {label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function StaffAccessSettings() {
+  const [loaded, setLoaded] = useState<{
+    defaultPanels: PosPanel[];
+    staff: StaffAccessRow[];
+  } | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [reloadTick, setReloadTick] = useState(0);
+  // Edited panels per row (SHARED_ROW = shared staff passcode); unsaved until Save.
+  const [drafts, setDrafts] = useState<Record<string, PosPanel[]>>({});
+  const [enabledDrafts, setEnabledDrafts] = useState<Record<string, boolean>>({});
+  const [saving, setSaving] = useState(false);
+  const [status, setStatus] = useState<{ tone: "ok" | "err"; text: string } | null>(null);
+
+  const [adminCode, setAdminCode] = useState("");
+  const [newCodes, setNewCodes] = useState<Record<string, string>>({});
+  const [codeBusy, setCodeBusy] = useState<string | null>(null);
+  const [codeStatus, setCodeStatus] = useState<{ id: string; tone: "ok" | "err"; text: string } | null>(
+    null,
+  );
+
+  React.useEffect(() => {
+    let cancelled = false;
+    fetchStaffAccess()
+      .then((data) => {
+        if (cancelled) return;
+        setLoaded(data);
+        setLoadError(null);
+      })
+      .catch((err) => {
+        console.error("Failed to load staff access:", err);
+        if (!cancelled) setLoadError("Could not load staff. Check your connection.");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [reloadTick]);
+
+  const panelsFor = (id: string, saved: PosPanel[]) => drafts[id] ?? saved;
+  const enabledFor = (s: StaffAccessRow) => enabledDrafts[s.id] ?? s.enabled;
+  const dirty = Object.keys(drafts).length > 0 || Object.keys(enabledDrafts).length > 0;
+
+  const saveAccess = async () => {
+    if (!loaded) return;
+    setSaving(true);
+    setStatus(null);
+    try {
+      const result = await saveStaffAccess({
+        defaultPanels: panelsFor(SHARED_ROW, loaded.defaultPanels),
+        staff: loaded.staff.map((s) => ({
+          id: s.id,
+          enabled: enabledFor(s),
+          panels: panelsFor(s.id, s.panels),
+        })),
+      });
+      if (!result.ok) {
+        setStatus({ tone: "err", text: result.error });
+        return;
+      }
+      setDrafts({});
+      setEnabledDrafts({});
+      setReloadTick((t) => t + 1);
+      setStatus({ tone: "ok", text: "Access saved. Staff see changes next time the POS loads." });
+    } catch (err) {
+      console.error("Failed to save staff access:", err);
+      setStatus({ tone: "err", text: "Could not save. Check your connection and try again." });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const savePasscode = async (staffId: string, remove: boolean) => {
+    const fail = (text: string) => setCodeStatus({ id: staffId, tone: "err", text });
+    if (!adminCode.trim()) return fail("Enter the admin passcode above first.");
+    const next = (newCodes[staffId] || "").trim();
+    if (!remove && !next) return fail("Type the new passcode.");
+    setCodeBusy(staffId);
+    try {
+      const result = await changeStaffPasscode({
+        staffId,
+        currentAdminPasscode: adminCode,
+        newPasscode: remove ? null : next,
+      });
+      if (!result.ok) return fail(result.error);
+      setNewCodes((prev) => ({ ...prev, [staffId]: "" }));
+      setCodeStatus({
+        id: staffId,
+        tone: "ok",
+        text: remove ? "Own passcode removed." : "Passcode saved.",
+      });
+      setReloadTick((t) => t + 1);
+    } catch (err) {
+      console.error("Failed to set staff passcode:", err);
+      fail("Could not save. Check your connection and try again.");
+    } finally {
+      setCodeBusy(null);
+    }
+  };
+
+  return (
+    <div className="bg-[#FFFFFF] border border-[#000000]/10 rounded-2xl p-5 sm:p-6 shadow-sm xl:col-span-2">
+      <h3 className="text-xs font-black uppercase tracking-widest text-[var(--accent)] flex items-center gap-2 mb-1">
+        <Users className="w-4 h-4" /> Staff Access
+      </h3>
+      <p className="text-[10px] text-[#000000]/50 font-semibold mb-5">
+        Switch on POS access for each staff member, give them their own passcode, and choose the
+        panels they see. Staff without their own login use the shared staff passcode and its
+        panels. Remember to press Save Access. Settings always stays admin-only.
+      </p>
+
+      {loadError ? (
+        <p className="text-xs font-bold text-[#B91C1C]">{loadError}</p>
+      ) : !loaded ? (
+        <p className="text-xs font-semibold text-[#000000]/50 flex items-center gap-2">
+          <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading staff…
+        </p>
+      ) : (
+        <>
+          <div className="max-w-sm mb-5">
+            <PasscodeField
+              id="access-admin-code"
+              label="Admin Passcode (needed to set staff passcodes)"
+              value={adminCode}
+              onChange={(v) => {
+                setAdminCode(v);
+                setCodeStatus(null);
+              }}
+              show={false}
+              autoComplete="current-password"
+            />
+          </div>
+
+          <div className="divide-y divide-[#000000]/10 border-y border-[#000000]/10">
+            <div className="py-4">
+              <p className="text-[11px] font-black uppercase tracking-wider text-[#000000]">
+                Shared Staff Passcode
+              </p>
+              <p className="text-[10px] text-[#000000]/50 font-semibold mb-2.5">
+                Anyone signing in with the shared staff passcode. Also the starting panels for staff
+                you haven&apos;t customised.
+              </p>
+              <PanelToggles
+                value={panelsFor(SHARED_ROW, loaded.defaultPanels)}
+                onChange={(next) => {
+                  setDrafts((prev) => ({ ...prev, [SHARED_ROW]: next }));
+                  setStatus(null);
+                }}
+              />
+            </div>
+
+            {loaded.staff.length === 0 && (
+              <p className="py-4 text-[11px] font-semibold text-[#000000]/55">
+                No staff yet. Add staff in Attendance → Staff, then give each one a passcode and
+                panels here.
+              </p>
+            )}
+
+            {loaded.staff.map((s) => {
+              const enabled = enabledFor(s);
+              const canSignIn = s.isActive && enabled && s.hasPasscode;
+              return (
+              <div key={s.id} className="py-4">
+                <div className="flex flex-wrap items-center gap-2 mb-1">
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={enabled}
+                    aria-label={`POS access for ${s.name}`}
+                    onClick={() => {
+                      setEnabledDrafts((prev) => ({ ...prev, [s.id]: !enabled }));
+                      setStatus(null);
+                    }}
+                    className={`relative w-9 h-5 rounded-full shrink-0 transition-colors cursor-pointer ${
+                      enabled ? "bg-[var(--accent)]" : "bg-[#000000]/20"
+                    }`}
+                  >
+                    <span
+                      className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${
+                        enabled ? "translate-x-4" : ""
+                      }`}
+                    />
+                  </button>
+                  <p className="text-[11px] font-black uppercase tracking-wider text-[#000000]">
+                    {s.name}
+                  </p>
+                  {s.role && (
+                    <span className="text-[10px] font-semibold text-[#000000]/45">{s.role}</span>
+                  )}
+                  <span
+                    className={`text-[9px] font-black uppercase tracking-widest px-1.5 py-0.5 rounded border ${
+                      canSignIn
+                        ? "text-[#15803D] border-[#15803D]/30 bg-[#15803D]/5"
+                        : !s.isActive || !enabled
+                          ? "text-[#000000]/45 border-[#000000]/15"
+                          : "text-[#B45309] border-[#B45309]/30 bg-[#B45309]/5"
+                    }`}
+                  >
+                    {!s.isActive
+                      ? "Inactive staff"
+                      : !enabled
+                        ? "POS access off"
+                        : s.hasPasscode
+                          ? "Can sign in"
+                          : "Needs a passcode"}
+                  </span>
+                </div>
+                {s.isActive && enabled && !s.hasPasscode && (
+                  <p className="text-[10px] text-[#B45309] font-semibold mb-2">
+                    Set a passcode below so {s.name} can sign in with these panels.
+                  </p>
+                )}
+                {s.isActive && !enabled && (
+                  <p className="text-[10px] text-[#000000]/50 font-semibold mb-2">
+                    Switch on to let {s.name} sign in with their own passcode.
+                  </p>
+                )}
+                <div className={`mt-2 ${enabled ? "" : "opacity-50"}`}>
+                  <PanelToggles
+                    disabled={!enabled}
+                    value={panelsFor(s.id, s.panels)}
+                    onChange={(next) => {
+                      setDrafts((prev) => ({ ...prev, [s.id]: next }));
+                      setStatus(null);
+                    }}
+                  />
+                </div>
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <input
+                    type="password"
+                    autoComplete="new-password"
+                    aria-label={`New passcode for ${s.name}`}
+                    placeholder={s.hasPasscode ? "New passcode" : "Set a passcode"}
+                    value={newCodes[s.id] || ""}
+                    onChange={(e) => {
+                      setNewCodes((prev) => ({ ...prev, [s.id]: e.target.value }));
+                      setCodeStatus(null);
+                    }}
+                    className={`${inputCls} font-mono max-w-[200px] py-2`}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => savePasscode(s.id, false)}
+                    disabled={codeBusy !== null}
+                    className="inline-flex items-center gap-1.5 bg-[#000000] hover:bg-[#000000]/85 disabled:opacity-50 text-white text-[10px] font-extrabold uppercase tracking-wider px-3 py-2 rounded-lg cursor-pointer transition-colors"
+                  >
+                    {codeBusy === s.id ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <KeyRound className="w-3.5 h-3.5" />
+                    )}
+                    {s.hasPasscode ? "Change" : "Set"} Passcode
+                  </button>
+                  {s.hasPasscode && (
+                    <button
+                      type="button"
+                      onClick={() => savePasscode(s.id, true)}
+                      disabled={codeBusy !== null}
+                      className="text-[10px] font-bold uppercase tracking-wider text-[#B91C1C] hover:underline px-2 py-2 cursor-pointer disabled:opacity-50"
+                    >
+                      Remove
+                    </button>
+                  )}
+                  {codeStatus?.id === s.id && (
+                    <span
+                      role="status"
+                      className={`inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider ${
+                        codeStatus.tone === "ok" ? "text-[#15803D]" : "text-[#B91C1C]"
+                      }`}
+                    >
+                      {codeStatus.tone === "ok" ? (
+                        <Check className="w-3.5 h-3.5" />
+                      ) : (
+                        <AlertCircle className="w-3.5 h-3.5" />
+                      )}
+                      {codeStatus.text}
+                    </span>
+                  )}
+                </div>
+              </div>
+              );
+            })}
+          </div>
+
+          <div className="mt-5 flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={saveAccess}
+              disabled={saving || !dirty}
+              className="inline-flex items-center gap-2 bg-[#000000] hover:bg-[#000000]/85 disabled:opacity-50 text-white text-[11px] font-extrabold uppercase tracking-wider px-4 py-2.5 rounded-lg cursor-pointer transition-colors"
+            >
+              {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+              Save Access
+            </button>
+            {dirty && !status && (
+              <span className="text-[10px] font-bold uppercase tracking-wider text-[#B45309]">
+                Unsaved changes
+              </span>
+            )}
+            {status && (
+              <span
+                role="status"
+                className={`inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider ${
+                  status.tone === "ok" ? "text-[#15803D]" : "text-[#B91C1C]"
+                }`}
+              >
+                {status.tone === "ok" ? <Check className="w-3.5 h-3.5" /> : <AlertCircle className="w-3.5 h-3.5" />}
+                {status.text}
+              </span>
+            )}
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -739,7 +1103,11 @@ function PasscodeSettings() {
       {(
         [
           { role: "admin", title: "Admin Passcode", hint: "Full access, including Settings and reports." },
-          { role: "staff", title: "Staff Passcode", hint: "Billing, orders and attendance only." },
+          {
+            role: "staff",
+            title: "Shared Staff Passcode",
+            hint: "For staff without their own passcode. Their panels are set in Staff Access.",
+          },
         ] as const
       ).map(({ role, title, hint }) => (
         <div key={role} className="mt-5 pt-5 border-t border-[#000000]/10">
