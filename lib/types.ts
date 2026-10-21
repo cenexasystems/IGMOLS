@@ -4,8 +4,8 @@ export type Category = {
   created_at: string;
 };
 
-/** Products are physical items that carry stock; services are non-stocked add-ons. */
-export type ItemType = 'PRODUCT' | 'SERVICE';
+/** Every catalogue item is a stocked product (services were removed). */
+export type ItemType = 'PRODUCT';
 
 export type Product = {
   id: string;
@@ -15,9 +15,9 @@ export type Product = {
   gst_rate: number; // Default GST % for this product (editable at billing)
   hsn_code: string | null; // HSN/SAC code shown on GST invoices
   selling_price: number; // GST-exclusive catalog price (GST added at billing)
-  item_type: ItemType; // SERVICE rows never track stock
+  item_type: ItemType;
   cost_price: number; // Records only — never used in billing maths
-  current_stock: number | null; // null for services
+  current_stock: number | null;
   low_stock_alert: number | null; // null when low-stock alerts don't apply
   offer_discount_pct: number; // 0 = no automatic offer
   offer_price: number | null; // Price billed when an offer is active
@@ -30,8 +30,8 @@ export type Product = {
 };
 
 /**
- * A size / colour / SKU of a product, or an option of a service. Blank price
- * or cost falls back to the parent's. Service options never carry stock.
+ * A size / colour / SKU of a product. Blank price or cost falls back to the
+ * product's.
  */
 export type ProductVariant = {
   id: string;

@@ -160,13 +160,12 @@ async function syncVariantTotal(productId: string): Promise<void> {
 /**
  * Replace a product's variant list with the form's list: update rows that kept
  * their id, insert new ones, delete the rest. Every stock change is logged per
- * variant. Services keep their options but never hold stock.
+ * variant.
  */
 async function saveVariants(
-  product: { id: string; name: string; item_type: ItemType },
+  product: { id: string; name: string },
   variants: ProductVariantInput[],
 ): Promise<void> {
-  const isService = product.item_type === 'SERVICE';
   const existing = (
     (await sql`SELECT * FROM product_variants WHERE product_id = ${product.id}`) as Record<string, unknown>[]
   ).map(toVariant);
@@ -176,20 +175,18 @@ async function saveVariants(
   for (const old of existing) {
     if (keep.has(old.id)) continue;
     await sql`DELETE FROM product_variants WHERE id = ${old.id}`;
-    if (!isService) {
-      await recordMovement({
-        productId: product.id,
-        productName: label(old.name),
-        type: 'EDIT',
-        before: old.stock ?? 0,
-        after: 0,
-        note: 'Variant removed',
-      });
-    }
+    await recordMovement({
+      productId: product.id,
+      productName: label(old.name),
+      type: 'EDIT',
+      before: old.stock ?? 0,
+      after: 0,
+      note: 'Variant removed',
+    });
   }
 
   for (const [index, v] of variants.entries()) {
-    const stock = isService ? null : Math.max(0, Number(v.stock) || 0);
+    const stock = Math.max(0, Number(v.stock) || 0);
     const old = v.id ? existing.find((e) => e.id === v.id) : undefined;
     if (old) {
       await sql`
@@ -198,35 +195,31 @@ async function saveVariants(
             stock = ${stock}, barcode = ${v.barcode}, sort_order = ${index}
         WHERE id = ${old.id}
       `;
-      if (!isService) {
-        await recordMovement({
-          productId: product.id,
-          productName: label(v.name),
-          type: 'EDIT',
-          before: old.stock ?? 0,
-          after: stock ?? 0,
-        });
-      }
+      await recordMovement({
+        productId: product.id,
+        productName: label(v.name),
+        type: 'EDIT',
+        before: old.stock ?? 0,
+        after: stock,
+      });
     } else {
       await sql`
         INSERT INTO product_variants (id, product_id, name, price, cost_price, stock, barcode, sort_order)
         VALUES (${uid()}, ${product.id}, ${v.name}, ${v.price}, ${v.cost_price}, ${stock}, ${v.barcode}, ${index})
       `;
-      if (!isService) {
-        await recordMovement({
-          productId: product.id,
-          productName: label(v.name),
-          type: 'OPENING',
-          before: 0,
-          after: stock ?? 0,
-          note: 'Opening stock',
-        });
-      }
+      await recordMovement({
+        productId: product.id,
+        productName: label(v.name),
+        type: 'OPENING',
+        before: 0,
+        after: stock,
+        note: 'Opening stock',
+      });
     }
   }
 
   await sql`UPDATE products SET has_variants = ${variants.length > 0} WHERE id = ${product.id}`;
-  if (!isService && variants.length > 0) await syncVariantTotal(product.id);
+  if (variants.length > 0) await syncVariantTotal(product.id);
 }
 
 export const dbStore = {
@@ -269,7 +262,7 @@ export const dbStore = {
   // PRODUCTS
 
   /**
-   * Bring an existing `products` table up to date with the product/service
+   * Bring an existing `products` table up to date with the product
    * columns. Every statement is idempotent, so this is safe to run on every
    * list/add/update.
    */
@@ -310,8 +303,6 @@ export const dbStore = {
   }): Promise<Product> {
     await this.ensureProductSchema();
     const id = uid();
-    // Services never hold stock, so those columns are always written as NULL.
-    const isService = input.item_type === 'SERVICE';
     const variants = input.variants ?? [];
     const hasVariants = variants.length > 0;
     const rows = await sql`
@@ -323,9 +314,9 @@ export const dbStore = {
       VALUES (
         ${id}, ${input.name}, ${input.description}, ${input.category},
         ${input.gst_rate}, ${input.hsn_code}, ${input.selling_price},
-        ${isService ? 'SERVICE' : 'PRODUCT'}, ${input.cost_price ?? 0},
-        ${isService ? null : hasVariants ? 0 : input.current_stock ?? 0},
-        ${isService ? null : input.low_stock_alert ?? 0},
+        'PRODUCT', ${input.cost_price ?? 0},
+        ${hasVariants ? 0 : input.current_stock ?? 0},
+        ${input.low_stock_alert ?? 0},
         ${input.offer_discount_pct ?? 0}, ${input.offer_price ?? null},
         ${input.is_active ?? true}, ${input.tamil_name ?? null}, ${input.barcode ?? null},
         ${hasVariants}
@@ -338,16 +329,14 @@ export const dbStore = {
       await saveVariants(product, variants);
       return (await this.getProduct(id)) as Product;
     }
-    if (!isService) {
-      await recordMovement({
-        productId: product.id,
-        productName: product.name,
-        type: 'OPENING',
-        before: 0,
-        after: Number(product.current_stock) || 0,
-        note: 'Opening stock',
-      });
-    }
+    await recordMovement({
+      productId: product.id,
+      productName: product.name,
+      type: 'OPENING',
+      before: 0,
+      after: Number(product.current_stock) || 0,
+      note: 'Opening stock',
+    });
     return { ...product, variants: [] };
   },
 
@@ -379,7 +368,6 @@ export const dbStore = {
     if (patch.gst_rate !== undefined) await sql`UPDATE products SET gst_rate = ${patch.gst_rate} WHERE id = ${id}`;
     if (patch.hsn_code !== undefined) await sql`UPDATE products SET hsn_code = ${patch.hsn_code} WHERE id = ${id}`;
     if (patch.selling_price !== undefined) await sql`UPDATE products SET selling_price = ${patch.selling_price} WHERE id = ${id}`;
-    if (patch.item_type !== undefined) await sql`UPDATE products SET item_type = ${patch.item_type} WHERE id = ${id}`;
     if (patch.cost_price !== undefined) await sql`UPDATE products SET cost_price = ${patch.cost_price} WHERE id = ${id}`;
     if (patch.offer_discount_pct !== undefined) await sql`UPDATE products SET offer_discount_pct = ${patch.offer_discount_pct} WHERE id = ${id}`;
     if (patch.offer_price !== undefined) await sql`UPDATE products SET offer_price = ${patch.offer_price} WHERE id = ${id}`;
@@ -387,27 +375,15 @@ export const dbStore = {
     if (patch.tamil_name !== undefined) await sql`UPDATE products SET tamil_name = ${patch.tamil_name} WHERE id = ${id}`;
     if (patch.barcode !== undefined) await sql`UPDATE products SET barcode = ${patch.barcode} WHERE id = ${id}`;
 
-    // Stock is meaningless for services — switching the type to SERVICE clears it.
-    if (
-      patch.current_stock !== undefined ||
-      patch.low_stock_alert !== undefined ||
-      patch.item_type !== undefined
-    ) {
-      const existing = await this.getProduct(id);
-      if (existing && existing.item_type === 'SERVICE') {
-        await sql`UPDATE products SET current_stock = NULL, low_stock_alert = NULL WHERE id = ${id}`;
-      } else {
-        if (patch.current_stock !== undefined)
-          await sql`UPDATE products SET current_stock = ${patch.current_stock} WHERE id = ${id}`;
-        if (patch.low_stock_alert !== undefined)
-          await sql`UPDATE products SET low_stock_alert = ${patch.low_stock_alert} WHERE id = ${id}`;
-      }
-    }
+    if (patch.current_stock !== undefined)
+      await sql`UPDATE products SET current_stock = ${patch.current_stock} WHERE id = ${id}`;
+    if (patch.low_stock_alert !== undefined)
+      await sql`UPDATE products SET low_stock_alert = ${patch.low_stock_alert} WHERE id = ${id}`;
 
     if (variants !== undefined) {
-      const current = await sql`SELECT id, name, item_type FROM products WHERE id = ${id}`;
+      const current = await sql`SELECT id, name FROM products WHERE id = ${id}`;
       if (current.length > 0) {
-        await saveVariants(current[0] as { id: string; name: string; item_type: ItemType }, variants);
+        await saveVariants(current[0] as { id: string; name: string }, variants);
       }
     }
 
@@ -460,7 +436,7 @@ export const dbStore = {
     return this.getProduct(variant.product_id);
   },
 
-  /** Adjust stock after a completed sale. Services are skipped (stock is NULL). */
+  /** Adjust stock after a completed sale. */
   async decrementStock(
     productId: string,
     qty: number,
@@ -750,7 +726,6 @@ export const dbStore = {
     );
 
     // Sell-through: reduce stock for every catalogued product on the bill.
-    // Services have NULL stock and are skipped by the query.
     await Promise.all(
       payload.items
         .filter((item) => item.product_id)
