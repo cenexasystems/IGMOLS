@@ -363,11 +363,6 @@ export default function StockMovementsPanel({
                       </td>
                       <td className="p-3 text-sm font-bold text-[#000000]">
                         {m.product_name}
-                        {!m.product_id && (
-                          <span className="ml-1.5 text-[9px] font-bold uppercase tracking-wider text-[#000000]/40">
-                            deleted
-                          </span>
-                        )}
                       </td>
                       <td className="p-3">
                         <span

@@ -503,7 +503,9 @@ export const dbStore = {
     }
   },
 
+  /** Also removes the product's variants and stock movements (ON DELETE CASCADE). */
   async deleteProduct(id: string): Promise<void> {
+    await this.ensureProductSchema();
     await sql`DELETE FROM products WHERE id = ${id}`;
   },
 

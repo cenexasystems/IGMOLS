@@ -212,8 +212,8 @@ CREATE INDEX IF NOT EXISTS idx_product_variants_product ON product_variants (pro
 -- STOCK MOVEMENTS (audit ledger; quantity is signed: + in / − out) --------
 CREATE TABLE IF NOT EXISTS stock_movements (
   id            TEXT PRIMARY KEY,
-  product_id    TEXT REFERENCES products (id) ON DELETE SET NULL,
-  product_name  TEXT NOT NULL,          -- snapshot, survives product deletion
+  product_id    TEXT REFERENCES products (id) ON DELETE CASCADE,  -- history goes with the product
+  product_name  TEXT NOT NULL,          -- "Name (Variant)" at the time of the movement
   movement_type TEXT NOT NULL,          -- OPENING | RESTOCK | RETURN | SALE | LOSS | RECONCILE | EDIT
   quantity      NUMERIC NOT NULL,
   stock_before  NUMERIC NOT NULL,

@@ -11,7 +11,7 @@ import { sql } from './db';
  * Adding a migration: append statements to `migrations()` and bump
  * SCHEMA_VERSION. Statements must stay idempotent (IF NOT EXISTS etc.).
  */
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 const migrations = () => [
   sql`
@@ -143,7 +143,7 @@ const migrations = () => [
   sql`
     CREATE TABLE IF NOT EXISTS stock_movements (
       id            TEXT PRIMARY KEY,
-      product_id    TEXT REFERENCES products (id) ON DELETE SET NULL,
+      product_id    TEXT REFERENCES products (id) ON DELETE CASCADE,
       product_name  TEXT NOT NULL,
       movement_type TEXT NOT NULL,
       quantity      NUMERIC NOT NULL,
@@ -155,6 +155,14 @@ const migrations = () => [
     )
   `,
   sql`CREATE INDEX IF NOT EXISTS idx_stock_movements_created ON stock_movements (created_at DESC)`,
+  // v3: deleting a product deletes its movement history too. Clear the rows
+  // left behind by products deleted before this (product_id set to NULL).
+  sql`ALTER TABLE stock_movements DROP CONSTRAINT IF EXISTS stock_movements_product_id_fkey`,
+  sql`
+    ALTER TABLE stock_movements ADD CONSTRAINT stock_movements_product_id_fkey
+    FOREIGN KEY (product_id) REFERENCES products (id) ON DELETE CASCADE
+  `,
+  sql`DELETE FROM stock_movements WHERE product_id IS NULL`,
 
   sql`
     INSERT INTO app_meta (key, value) VALUES ('schema_version', ${String(SCHEMA_VERSION)})

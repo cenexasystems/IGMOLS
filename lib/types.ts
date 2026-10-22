@@ -83,8 +83,8 @@ export type StockMovementType =
 /** One row in the stock movement ledger. `quantity` is signed (+in / −out). */
 export type StockMovement = {
   id: string;
-  product_id: string | null; // NULL once the product is deleted
-  product_name: string; // snapshot, so the ledger survives product deletion
+  product_id: string | null; // movements are deleted with their product
+  product_name: string; // "Name (Variant)" at the time of the movement
   movement_type: StockMovementType;
   quantity: number;
   stock_before: number;
