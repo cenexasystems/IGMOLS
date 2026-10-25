@@ -71,6 +71,9 @@ import {
   createExpense,
   editExpense,
   removeExpense,
+  createExpenseCategory,
+  setExpenseCategoryActive,
+  removeExpenseCategory,
   fetchCategories,
   createCategory,
   renameCategory,
@@ -82,7 +85,7 @@ import {
   setAdvanceOrderStatus,
   fetchPosData,
 } from "@/app/pos/actions";
-import { Product, Expense, Category, AdvanceOrderWithRelations, AdvanceOrderStatus, ShopSettings, effectivePrice } from "@/lib/types";
+import { Product, Expense, ExpenseCategory, Category, AdvanceOrderWithRelations, AdvanceOrderStatus, ShopSettings, effectivePrice } from "@/lib/types";
 import { DEFAULT_SHOP_SETTINGS } from "@/lib/shopProfile";
 import type { PosPanel } from "@/lib/posAccess";
 import SettingsPanel from "./SettingsPanel";
@@ -91,20 +94,6 @@ import StaffPunch from "./StaffPunch";
 import LowStockAlarm, { type LowStockItem } from "./LowStockAlarm";
 import StockMovementsPanel from "./StockMovementsPanel";
 import { advanceCharges } from "@/lib/advanceCharges";
-
-// Preset expense categories (users can also type a custom one)
-const EXPENSE_CATEGORIES = [
-  "Stock Purchase",
-  "Rent",
-  "Salaries",
-  "Utilities",
-  "Electricity",
-  "Transport",
-  "Marketing",
-  "Repairs & Maintenance",
-  "Taxes & Fees",
-  "Miscellaneous",
-] as const;
 
 const EXPENSE_PAYMENT_MODES = ["CASH", "UPI", "CARD", "BANK", "OTHER"] as const;
 
@@ -633,8 +622,16 @@ export default function POSBilling() {
   // Expense tracker state
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [expTitle, setExpTitle] = useState("");
-  const [expCategory, setExpCategory] = useState<string>(EXPENSE_CATEGORIES[0]);
-  const [expCustomCategory, setExpCustomCategory] = useState("");
+  // "" = the first active category (derived below as expCategoryValue).
+  const [expCategory, setExpCategory] = useState<string>("");
+  // Categories are managed in the tracker (Spend by Category → Manage).
+  const [expenseCategories, setExpenseCategories] = useState<ExpenseCategory[]>([]);
+  const [showExpenseCatManager, setShowExpenseCatManager] = useState(false);
+  const [newExpenseCatName, setNewExpenseCatName] = useState("");
+  const [expenseCatError, setExpenseCatError] = useState<string | null>(null);
+  const [isSavingExpenseCat, setIsSavingExpenseCat] = useState(false);
+  const activeExpenseCategories = expenseCategories.filter((c) => c.is_active).map((c) => c.name);
+  const expCategoryValue = expCategory || activeExpenseCategories[0] || "General";
   const [expAmount, setExpAmount] = useState<number | "">("");
   const [expPaymentMode, setExpPaymentMode] = useState<string>("CASH");
   const [expNotes, setExpNotes] = useState("");
@@ -817,7 +814,9 @@ export default function POSBilling() {
         categories: categoriesData,
         advanceOrders: advanceData,
         shopSettings: shopData,
+        expenseCategories: expenseCategoryData,
       } = await fetchPosData();
+      setExpenseCategories(expenseCategoryData);
       setShopSettings(shopData);
       setShopSettingsLoaded(true);
       setAdvanceOrders(
@@ -2143,9 +2142,7 @@ export default function POSBilling() {
   const handleAddExpense = async () => {
     const amountNum =
       typeof expAmount === "number" ? expAmount : parseFloat(String(expAmount));
-    const category =
-      (expCategory === "__custom__" ? expCustomCategory : expCategory).trim() ||
-      "General";
+    const category = expCategoryValue.trim() || "General";
     if (!expTitle.trim()) {
       alert("Please enter what the expense was for.");
       return;
@@ -2190,10 +2187,6 @@ export default function POSBilling() {
       setExpTitle("");
       setExpAmount("");
       setExpNotes("");
-      if (expCategory === "__custom__") {
-        setExpCategory(category);
-        setExpCustomCategory("");
-      }
     } catch (err) {
       console.error("Error adding expense:", err);
       alert("Could not save the expense. Please try again.");
@@ -2208,13 +2201,8 @@ export default function POSBilling() {
     setExpAmount(Number(e.amount) || "");
     // Show the date as the user's local calendar day, matching the list.
     setExpDate(new Date(e.expense_date).toLocaleDateString("en-CA"));
-    if ((EXPENSE_CATEGORIES as readonly string[]).includes(e.category)) {
-      setExpCategory(e.category);
-      setExpCustomCategory("");
-    } else {
-      setExpCategory("__custom__");
-      setExpCustomCategory(e.category);
-    }
+    // Kept even if that category was since switched off or deleted.
+    setExpCategory(e.category);
     setExpPaymentMode(e.payment_mode);
     setExpNotes(e.notes || "");
     document
@@ -2222,13 +2210,66 @@ export default function POSBilling() {
       ?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
 
+  const handleAddExpenseCategory = async () => {
+    if (isSavingExpenseCat) return;
+    setIsSavingExpenseCat(true);
+    setExpenseCatError(null);
+    try {
+      const result = await createExpenseCategory(newExpenseCatName);
+      if (!result.ok) {
+        setExpenseCatError(result.error);
+        return;
+      }
+      setExpenseCategories((prev) =>
+        [...prev, result.category].sort((a, b) => a.name.localeCompare(b.name)),
+      );
+      setNewExpenseCatName("");
+    } catch (err) {
+      console.error("Failed to add expense category:", err);
+      setExpenseCatError("Could not add the category. Please try again.");
+    } finally {
+      setIsSavingExpenseCat(false);
+    }
+  };
+
+  const toggleExpenseCategory = async (cat: ExpenseCategory) => {
+    // Optimistic: flip now, put it back if the save fails.
+    const flip = (active: boolean) =>
+      setExpenseCategories((prev) =>
+        prev.map((c) => (c.id === cat.id ? { ...c, is_active: active } : c)),
+      );
+    flip(!cat.is_active);
+    try {
+      if (!(await setExpenseCategoryActive(cat.id, !cat.is_active))) flip(cat.is_active);
+    } catch (err) {
+      console.error("Failed to update expense category:", err);
+      flip(cat.is_active);
+      alert("Could not update the category. Please try again.");
+    }
+  };
+
+  const deleteExpenseCategory = async (cat: ExpenseCategory) => {
+    if (
+      !window.confirm(
+        `Delete the category "${cat.name}"? Expenses already filed under it keep the name.`,
+      )
+    )
+      return;
+    try {
+      await removeExpenseCategory(cat.id);
+      setExpenseCategories((prev) => prev.filter((c) => c.id !== cat.id));
+    } catch (err) {
+      console.error("Failed to delete expense category:", err);
+      alert("Could not delete the category. Please try again.");
+    }
+  };
+
   const cancelEditExpense = () => {
     setEditingExpenseId(null);
     setExpTitle("");
     setExpAmount("");
     setExpNotes("");
-    setExpCustomCategory("");
-    setExpCategory(EXPENSE_CATEGORIES[0]);
+    setExpCategory("");
     setExpPaymentMode("CASH");
     setExpDate(new Date().toLocaleDateString("en-CA"));
   };
@@ -7861,32 +7902,28 @@ export default function POSBilling() {
                       Category
                     </label>
                     <select
-                      value={expCategory}
+                      value={expCategoryValue}
                       onChange={(e) => setExpCategory(e.target.value)}
                       className="w-full bg-[#FAFAFA] border border-black/10 rounded-lg px-3 py-2 text-sm text-[#000000] focus:outline-none focus:border-[var(--accent)] cursor-pointer"
                     >
-                      {EXPENSE_CATEGORIES.map((c) => (
+                      {/* An expense being edited may use a category that is now off or deleted. */}
+                      {!activeExpenseCategories.includes(expCategoryValue) && (
+                        <option value={expCategoryValue}>{expCategoryValue}</option>
+                      )}
+                      {activeExpenseCategories.map((c) => (
                         <option key={c} value={c}>
                           {c}
                         </option>
                       ))}
-                      <option value="__custom__">+ Custom category…</option>
                     </select>
+                    <button
+                      type="button"
+                      onClick={() => setShowExpenseCatManager(true)}
+                      className="text-[10px] font-bold text-[var(--accent)] hover:underline mt-1 cursor-pointer"
+                    >
+                      Add or manage categories
+                    </button>
                   </div>
-                  {expCategory === "__custom__" && (
-                    <div>
-                      <label className="block text-[10px] font-bold uppercase tracking-wider text-[#000000] mb-1">
-                        Custom category name
-                      </label>
-                      <input
-                        type="text"
-                        value={expCustomCategory}
-                        onChange={(e) => setExpCustomCategory(e.target.value)}
-                        placeholder="e.g. Festival decorations"
-                        className="w-full bg-[#FAFAFA] border border-black/10 rounded-lg px-3 py-2 text-sm text-[#000000] focus:outline-none focus:border-[var(--accent)] placeholder:text-black/30"
-                      />
-                    </div>
-                  )}
                   <div>
                     <label className="block text-[10px] font-bold uppercase tracking-wider text-[#000000] mb-1">
                       Paid via
@@ -7942,11 +7979,133 @@ export default function POSBilling() {
 
               {/* Category breakdown */}
               <div className="lg:col-span-3 bg-white border border-black/10 rounded-2xl p-5 shadow-sm">
-                <h3 className="text-sm font-black text-[#000000] uppercase tracking-wider flex items-center gap-2 mb-4">
-                  <span className="w-1.5 h-6 bg-[var(--accent)] rounded-full" />
-                  Spend by Category
-                </h3>
-                {expenseStats.categoryBreakdown.length === 0 ? (
+                <div className="flex items-center justify-between gap-3 mb-4">
+                  <h3 className="text-sm font-black text-[#000000] uppercase tracking-wider flex items-center gap-2">
+                    <span className="w-1.5 h-6 bg-[var(--accent)] rounded-full" />
+                    Spend by Category
+                  </h3>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowExpenseCatManager((v) => !v);
+                      setExpenseCatError(null);
+                    }}
+                    className="text-[10px] font-bold text-[#000000] bg-white border border-black/10 hover:border-[var(--accent)] px-3 py-2 rounded-lg uppercase tracking-wider flex items-center gap-1.5 transition-colors cursor-pointer"
+                  >
+                    <SlidersHorizontal className="w-3.5 h-3.5" />
+                    {showExpenseCatManager ? "Close" : "Manage"}
+                  </button>
+                </div>
+                {showExpenseCatManager ? (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 items-start">
+                    {/* Add category */}
+                    <div className="border border-black/10 rounded-2xl p-4">
+                      <p className="text-xs font-black text-[#000000] flex items-center gap-2 pb-3 mb-3 border-b border-black/5">
+                        <Tag className="w-4 h-4" /> Add Category
+                      </p>
+                      <label
+                        htmlFor="new-expense-category"
+                        className="block text-[11px] font-bold text-[#000000]/70 mb-1.5"
+                      >
+                        Category Name <span className="text-[var(--accent)]">*</span>
+                      </label>
+                      <input
+                        id="new-expense-category"
+                        type="text"
+                        value={newExpenseCatName}
+                        onChange={(e) => {
+                          setNewExpenseCatName(e.target.value);
+                          setExpenseCatError(null);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") handleAddExpenseCategory();
+                        }}
+                        placeholder="e.g. Utility Bills, Packaging"
+                        className="w-full bg-[#FAFAFA] border border-black/10 rounded-lg px-3 py-2.5 text-sm text-[#000000] focus:outline-none focus:border-[var(--accent)] placeholder:text-black/30"
+                      />
+                      {expenseCatError && (
+                        <p role="alert" className="text-[11px] font-bold text-[#B91C1C] mt-1.5">
+                          {expenseCatError}
+                        </p>
+                      )}
+                      <button
+                        type="button"
+                        onClick={handleAddExpenseCategory}
+                        disabled={isSavingExpenseCat || !newExpenseCatName.trim()}
+                        className="w-full mt-3 bg-[var(--accent)] hover:bg-[var(--accent-strong)] disabled:opacity-45 disabled:cursor-not-allowed text-[var(--accent-on)] py-2.5 rounded-lg font-black text-[11px] uppercase tracking-[0.1em] flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                      >
+                        {isSavingExpenseCat ? (
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                          <Plus className="w-4 h-4" />
+                        )}
+                        Add Category
+                      </button>
+                    </div>
+
+                    {/* Category list */}
+                    <div className="border border-black/10 rounded-2xl overflow-hidden">
+                      <p className="text-xs font-black text-[#000000] px-4 py-3 bg-[#FAFAFA] border-b border-black/10">
+                        Expense Categories ({expenseCategories.length})
+                      </p>
+                      {expenseCategories.length === 0 ? (
+                        <p className="px-4 py-6 text-xs font-semibold text-[#000000]/50 text-center">
+                          No categories yet. Add one on the left.
+                        </p>
+                      ) : (
+                        <div className="max-h-80 overflow-y-auto">
+                          <table className="w-full text-left text-xs">
+                            <thead className="text-[10px] font-black uppercase tracking-wider text-[#000000]/55 border-b border-black/10">
+                              <tr>
+                                <th className="px-4 py-2">Category Name</th>
+                                <th className="px-2 py-2">Status</th>
+                                <th className="px-2 py-2 w-8">
+                                  <span className="sr-only">Delete</span>
+                                </th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-black/5">
+                              {expenseCategories.map((cat) => (
+                                <tr key={cat.id}>
+                                  <td className="px-4 py-2.5 font-bold text-[#000000]">{cat.name}</td>
+                                  <td className="px-2 py-2.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => toggleExpenseCategory(cat)}
+                                      title={
+                                        cat.is_active
+                                          ? "Click to hide from the expense form"
+                                          : "Click to show in the expense form"
+                                      }
+                                      className={`text-[10px] font-black px-2.5 py-1 rounded-full border cursor-pointer transition-colors ${
+                                        cat.is_active
+                                          ? "text-[#15803D] bg-[#15803D]/10 border-[#15803D]/25 hover:bg-[#15803D]/20"
+                                          : "text-[#000000]/50 bg-black/5 border-black/10 hover:bg-black/10"
+                                      }`}
+                                    >
+                                      {cat.is_active ? "Active" : "Inactive"}
+                                    </button>
+                                  </td>
+                                  <td className="px-2 py-2.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => deleteExpenseCategory(cat)}
+                                      aria-label={`Delete ${cat.name}`}
+                                      title="Delete category"
+                                      className="w-7 h-7 flex items-center justify-center rounded-md text-[#000000]/35 hover:text-[#DC2626] hover:bg-[#DC2626]/10 transition-colors cursor-pointer"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ) : expenseStats.categoryBreakdown.length === 0 ? (
                   <div className="py-12 text-center">
                     <div className="w-14 h-14 rounded-full bg-tertiary/10 flex items-center justify-center mx-auto mb-4">
                       <PiggyBank className="w-7 h-7 text-tertiary" />

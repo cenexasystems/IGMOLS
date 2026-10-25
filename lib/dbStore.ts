@@ -19,6 +19,7 @@ import {
   AttendanceStatus,
   StockMovement,
   StockMovementType,
+  ExpenseCategory,
   ProductVariant,
   ProductVariantInput,
 } from './types';
@@ -585,6 +586,38 @@ export const dbStore = {
   },
 
   // EXPENSES
+  // EXPENSE CATEGORIES
+  async listExpenseCategories(): Promise<ExpenseCategory[]> {
+    await ensureSchema();
+    const rows = await sql`SELECT * FROM expense_categories ORDER BY lower(name) ASC`;
+    return rows as ExpenseCategory[];
+  },
+
+  /** Returns null when a category with this name (any letter case) already exists. */
+  async addExpenseCategory(name: string): Promise<ExpenseCategory | null> {
+    await ensureSchema();
+    const rows = await sql`
+      INSERT INTO expense_categories (id, name) VALUES (${uid()}, ${name})
+      ON CONFLICT DO NOTHING
+      RETURNING *
+    `;
+    return (rows[0] as ExpenseCategory) ?? null;
+  },
+
+  async setExpenseCategoryActive(id: string, active: boolean): Promise<ExpenseCategory | null> {
+    await ensureSchema();
+    const rows = await sql`
+      UPDATE expense_categories SET is_active = ${active} WHERE id = ${id} RETURNING *
+    `;
+    return (rows[0] as ExpenseCategory) ?? null;
+  },
+
+  /** Expenses already filed under it keep their category name. */
+  async deleteExpenseCategory(id: string): Promise<void> {
+    await ensureSchema();
+    await sql`DELETE FROM expense_categories WHERE id = ${id}`;
+  },
+
   async listExpenses(): Promise<Expense[]> {
     const rows = await sql`
       SELECT * FROM expenses

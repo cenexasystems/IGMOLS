@@ -158,6 +158,14 @@ export type Expense = {
   created_at: string;
 };
 
+/** A category in the Expense Tracker; inactive ones are hidden from the add form. */
+export type ExpenseCategory = {
+  id: string;
+  name: string;
+  is_active: boolean;
+  created_at: string;
+};
+
 export type AdvanceOrderStatus = 'PENDING' | 'READY' | 'COMPLETED' | 'CANCELLED';
 
 export type AdvanceOrderRow = {

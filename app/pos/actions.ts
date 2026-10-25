@@ -1,7 +1,7 @@
 "use server";
 
 import { dbStore } from "@/lib/dbStore";
-import { Product, OrderWithRelations, CartItem, Expense, PaymentMode, Category, AdvanceOrderWithRelations, AdvanceOrderStatus, ShopSettings, ItemType, Staff, AttendanceRecord, AttendanceStatus, StockMovement, StockMovementType, ProductVariantInput } from "@/lib/types";
+import { Product, OrderWithRelations, CartItem, Expense, PaymentMode, Category, AdvanceOrderWithRelations, AdvanceOrderStatus, ShopSettings, ItemType, Staff, AttendanceRecord, AttendanceStatus, StockMovement, StockMovementType, ProductVariantInput, ExpenseCategory } from "@/lib/types";
 import { getShopSettings, saveShopSettings, normalizeHex, DEFAULT_ACCENT } from "@/lib/shopSettings";
 import {
   currentStaffAccess,
@@ -121,16 +121,51 @@ export async function fetchPosData(): Promise<{
   categories: Category[];
   advanceOrders: AdvanceOrderWithRelations[];
   shopSettings: ShopSettings;
+  expenseCategories: ExpenseCategory[];
 }> {
-  const [products, orders, expenses, categories, advanceOrders, shopSettings] = await Promise.all([
-    dbStore.listProducts(),
-    dbStore.listOrdersWithRelations(),
-    dbStore.listExpenses(),
-    dbStore.listCategories(),
-    dbStore.listAdvanceOrders(),
-    getShopSettings(),
-  ]);
-  return serialize({ products, orders, expenses, categories, advanceOrders, shopSettings });
+  const [products, orders, expenses, categories, advanceOrders, shopSettings, expenseCategories] =
+    await Promise.all([
+      dbStore.listProducts(),
+      dbStore.listOrdersWithRelations(),
+      dbStore.listExpenses(),
+      dbStore.listCategories(),
+      dbStore.listAdvanceOrders(),
+      getShopSettings(),
+      dbStore.listExpenseCategories(),
+    ]);
+  return serialize({
+    products,
+    orders,
+    expenses,
+    categories,
+    advanceOrders,
+    shopSettings,
+    expenseCategories,
+  });
+}
+
+// Expense categories (Expense Tracker → Manage)
+export async function createExpenseCategory(
+  name: string,
+): Promise<{ ok: true; category: ExpenseCategory } | { ok: false; error: string }> {
+  const clean = (name || "").trim().replace(/\s+/g, " ");
+  if (!clean) return { ok: false, error: "Enter a category name." };
+  if (clean.length > 60) return { ok: false, error: "Keep the name under 60 characters." };
+  const category = await dbStore.addExpenseCategory(clean);
+  return category
+    ? { ok: true, category: serialize(category) }
+    : { ok: false, error: `"${clean}" already exists.` };
+}
+
+export async function setExpenseCategoryActive(
+  id: string,
+  active: boolean,
+): Promise<ExpenseCategory | null> {
+  return serialize(await dbStore.setExpenseCategoryActive(id, Boolean(active)));
+}
+
+export async function removeExpenseCategory(id: string): Promise<void> {
+  return await dbStore.deleteExpenseCategory(id);
 }
 
 /** Staff list plus one day's attendance, in one request (see fetchPosData). */

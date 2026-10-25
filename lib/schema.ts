@@ -11,7 +11,7 @@ import { sql } from './db';
  * Adding a migration: append statements to `migrations()` and bump
  * SCHEMA_VERSION. Statements must stay idempotent (IF NOT EXISTS etc.).
  */
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 const migrations = () => [
   sql`
@@ -163,6 +163,30 @@ const migrations = () => [
     FOREIGN KEY (product_id) REFERENCES products (id) ON DELETE CASCADE
   `,
   sql`DELETE FROM stock_movements WHERE product_id IS NULL`,
+
+  // v4: expense categories managed in the Expense Tracker (were a fixed list).
+  sql`
+    CREATE TABLE IF NOT EXISTS expense_categories (
+      id          TEXT PRIMARY KEY,
+      name        TEXT NOT NULL,
+      is_active   BOOLEAN NOT NULL DEFAULT true,
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `,
+  sql`CREATE UNIQUE INDEX IF NOT EXISTS idx_expense_categories_name ON expense_categories (lower(name))`,
+  // Start from the old preset list plus every category already used on an expense.
+  sql`
+    INSERT INTO expense_categories (id, name)
+    SELECT gen_random_uuid()::text, name FROM (
+      SELECT unnest(ARRAY[
+        'Stock Purchase', 'Rent', 'Salaries', 'Utilities', 'Electricity', 'Transport',
+        'Marketing', 'Repairs & Maintenance', 'Taxes & Fees', 'Miscellaneous'
+      ]) AS name
+      UNION
+      SELECT DISTINCT trim(category) FROM expenses WHERE trim(category) <> ''
+    ) seed
+    ON CONFLICT DO NOTHING
+  `,
 
   sql`
     INSERT INTO app_meta (key, value) VALUES ('schema_version', ${String(SCHEMA_VERSION)})
